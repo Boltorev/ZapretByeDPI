@@ -3,6 +3,11 @@ name: Build APK
 on:
   push:
     branches: [ main, master ]
+    # Правки документации не должны запускать сборку APK.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
   workflow_dispatch:
 
