@@ -16,16 +16,24 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # Android SDK (cmdline-tools, platform-tools) уже присутствует на образе
+      # ubuntu-latest. Отдельный сторонний action для его установки не нужен:
+      # android-actions/setup-android@v3 периодически падает на новых образах,
+      # а нам достаточно sdkmanager из предустановленного SDK.
+      - name: Show Android SDK
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          command -v sdkmanager
+          sdkmanager --version
 
       - name: Install SDK / NDK / CMake packages
         run: |
