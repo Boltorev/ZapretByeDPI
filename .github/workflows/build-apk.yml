@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -24,25 +24,32 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Android SDK (cmdline-tools, platform-tools) уже присутствует на образе
-      # ubuntu-latest. Отдельный сторонний action для его установки не нужен:
-      # android-actions/setup-android@v3 периодически падает на новых образах,
-      # а нам достаточно sdkmanager из предустановленного SDK.
-      - name: Show Android SDK
+      # На образе ubuntu-latest Android SDK уже есть (ANDROID_HOME,
+      # platforms;android-34, build-tools;35.0.0), но sdkmanager не всегда
+      # попадает в PATH, а предустановленный NDK — 27.3, тогда как проект
+      # собран под 27.0.12077973. Поэтому sdkmanager ищем вручную, а NDK
+      # доставляем сами. Сторонние actions для SDK не используем.
+      - name: Locate Android SDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          command -v sdkmanager
-          sdkmanager --version
+          ls "${ANDROID_HOME}/cmdline-tools" || true
+          find "${ANDROID_HOME}/cmdline-tools" -maxdepth 3 -name sdkmanager -type f || true
 
-      - name: Install SDK / NDK / CMake packages
+      - name: Install NDK 27.0.12077973
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install \
-            "platforms;android-34" \
-            "build-tools;35.0.0" \
+          set -e
+          SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -maxdepth 3 -name sdkmanager -type f | head -n1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager не найден в ${ANDROID_HOME}/cmdline-tools" >&2
+            exit 1
+          fi
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install \
             "ndk;27.0.12077973" \
-            "cmake;3.22.1"
+            "platforms;android-34" \
+            "build-tools;35.0.0"
+          echo "NDK dirs:" && ls "${ANDROID_HOME}/ndk"
 
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
