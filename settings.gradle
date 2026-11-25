@@ -1,0 +1,25 @@
+// ---------------------------------------------------------------------------
+// settings.gradle — сообщает Gradle, какие модули входят в проект.
+// Здесь же настраиваются репозитории, откуда скачиваются плагины и библиотеки.
+// ---------------------------------------------------------------------------
+
+pluginManagement {
+    repositories {
+        // google() нужен для Android Gradle Plugin (AGP) и AndroidX.
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    // Запрещаем модулям объявлять свои репозитории: всё централизовано здесь.
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "ZapretByeDPI"
+include(":app")

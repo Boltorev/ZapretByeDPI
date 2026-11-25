@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Общие -->
+    <string name="app_name">ByeDPI Zapret</string>
+    <string name="app_subtitle">Обход DPI на Android · движок ByeDPI</string>
+    <!-- Заголовок -->
+
+    <string name="value_none">—</string>
+    <string name="value_zero">0</string>
+    <string name="number_format">%1$d</string>
+
+    <!-- Большая кнопка -->
+    <string name="power_button_description_off">Включить VPN</string>
+    <string name="power_button_description_on">Выключить VPN</string>
+    <string name="power_label_off">ВЫКЛЮЧЕНО</string>
+    <string name="power_label_starting">ЗАПУСК…</string>
+    <string name="power_label_running">РАБОТАЕТ</string>
+    <string name="power_label_stopping">ОСТАНОВКА…</string>
+    <string name="power_label_error">ОШИБКА</string>
+    <string name="power_hint_off">Нажмите, чтобы включить VPN</string>
+    <string name="power_hint_starting">Проверяем стратегии и создаём туннель…</string>
+    <string name="power_hint_running">VPN активен · трафик идёт через ByeDPI</string>
+    <string name="power_hint_stopping">Закрываем туннель…</string>
+    <string name="power_hint_error">Не удалось запустить VPN. Подробности в журнале.</string>
+
+    <!-- Карточка состояния -->
+    <string name="state_card_title">СОСТОЯНИЕ</string>
+    <string name="state_vpn">VPN</string>
+    <string name="state_tun">TUN-интерфейс</string>
+    <string name="state_engine">Движок</string>
+    <string name="state_socks">SOCKS5</string>
+    <string name="state_traffic">Трафик</string>
+    <string name="state_preset">Пресет</string>
+    <string name="state_rotations">Ротаций</string>
+    <string name="state_uptime">В работе</string>
+    <string name="state_value_stopped">Остановлен</string>
+    <string name="state_value_starting">Запуск…</string>
+    <string name="state_value_running">Работает</string>
+    <string name="state_value_stopping">Остановка…</string>
+    <string name="state_value_error">Ошибка</string>
+
+    <!-- Пояснение -->
+    <string name="traffic_format">↓ %1$s · ↑ %2$s</string>
+
+    <!-- Журнал -->
+    <string name="log_title">ЖУРНАЛ</string>
+    <string name="log_clear">Очистить</string>
+    <string name="log_export">Скачать</string>
+    <string name="log_export_success">Логи сохранены</string>
+    <string name="log_export_error">Не удалось сохранить логи</string>
+    <string name="log_empty">Пока нет событий</string>
+
+    <!-- Подвал -->
+    <string name="footer">ByeDPI 0.17.3 · hev 2.20.0 · TG WS Proxy</string>
+
+    <!-- Уведомление foreground-службы -->
+    <string name="notification_channel_name">Состояние VPN</string>
+    <string name="notification_channel_description">Постоянное уведомление о работе VPN-туннеля</string>
+    <string name="notification_text_starting">Создаём VPN-туннель…</string>
+    <string name="notification_text_running">VPN активен · пресет %1$s</string>
+    <string name="notification_action_stop">Остановить</string>
+
+    <!-- Ошибки и разрешения -->
+    <string name="vpn_permission_denied">Без разрешения VPN туннель создать нельзя.</string>
+    <string name="vpn_prepare_error">Не удалось запросить разрешение VPN: %1$s</string>
+
+    <!-- Этап 4: настройки -->
+    <string name="settings_title">НАСТРОЙКИ</string>
+    <string name="settings_subtitle">Приложения и домены</string>
+    <string name="apps_title">Приложения</string>
+    <string name="domains_title">Домены</string>
+    <string name="log_open">Открыть</string>
+
+    <string name="app_list_title">Приложения в VPN</string>
+    <string name="app_list_subtitle">Какие приложения направлять в туннель</string>
+    <string name="app_list_search">Поиск приложения…</string>
+    <string name="app_mode_all">Все приложения</string>
+    <string name="app_mode_only">Только выбранные</string>
+    <string name="app_mode_except">Все, кроме выбранных</string>
+    <string name="app_list_save">Сохранить</string>
+    <string name="app_list_saved">Правила сохранены</string>
+    <string name="app_list_restart">Правила применятся после перезапуска VPN</string>
+    <string name="app_list_only_empty">Выберите хотя бы одно приложение для режима «Только выбранные»</string>
+    <string name="app_list_count">Выбрано: %1$d · всего: %2$d</string>
+    <string name="app_list_loading">Загружаем приложения…</string>
+    <string name="app_list_empty">Приложения не найдены</string>
+
+    <string name="domains_title_full">Свои домены</string>
+    <string name="domains_subtitle">По одному домену на строку. Для них включается split по первому байту, даже если это не YouTube или Discord.</string>
+    <string name="domains_hint">example.com\nsub.example.org</string>
+    <string name="domains_save">Сохранить</string>
+    <string name="domains_saved">Сохранено доменов: %1$d</string>
+    <string name="domains_example">Пример</string>
+    <string name="domains_clear">Очистить</string>
+    <string name="domains_count">Доменов: %1$d</string>
+    <string name="domains_restart">Список применятся после перезапуска VPN</string>
+    <string name="vpn_restarting">Перезапускаем VPN…</string>
+
+    <string name="log_title_full">Журнал</string>
+    <string name="log_search">Поиск по журналу…</string>
+    <string name="log_level_all">Все уровни</string>
+    <string name="log_level_debug">DEBUG</string>
+    <string name="log_level_info">INFO</string>
+    <string name="log_level_warn">WARN</string>
+    <string name="log_level_error">ERROR</string>
+    <string name="log_copy">Копировать</string>
+    <string name="log_copied">Журнал скопирован</string>
+    <string name="log_clear_confirm">Очистить журнал?</string>
+    <string name="log_count">Записей: %1$d из %2$d</string>
+    <string name="log_empty_filter">Нет записей по фильтру</string>
+
+    <!-- Telegram WS proxy -->
+    <string name="telegram_title">Telegram WS-прокси</string>
+    <string name="telegram_state_label">СОСТОЯНИЕ</string>
+    <string name="telegram_cf">Cloudflare fallback</string>
+    <string name="telegram_cf_hint">Если пинг высокий, выключите fallback и перезапустите прокси. Если Telegram перестанет подключаться — включите обратно.</string>
+    <string name="telegram_cf_changed">Перезапустите прокси, чтобы применить</string>
+    <string name="telegram_subtitle">Локальный MTProto → WebSocket. Применяется к Telegram на этом устройстве.</string>
+    <string name="telegram_start">Запустить</string>
+    <string name="telegram_stop">Остановить</string>
+    <string name="telegram_apply">Применить в Telegram</string>
+    <string name="telegram_copy">Копировать ссылку</string>
+    <string name="telegram_status_off">Остановлен</string>
+    <string name="telegram_status_starting">Запускается…</string>
+    <string name="telegram_status_running">Работает на 127.0.0.1:%1$d</string>
+    <string name="telegram_status_error">Ошибка: %1$s</string>
+    <string name="telegram_secret">Секрет: %1$s</string>
+    <string name="telegram_not_running">Сначала запустите WS-прокси</string>
+    <string name="telegram_link_copied">Ссылка скопирована</string>
+    <string name="telegram_starting">Запуск Telegram WS-прокси…</string>
+    <string name="telegram_running">127.0.0.1:%1$d</string>
+    <string name="telegram_error">Ошибка: %1$s</string>
+    <string name="telegram_error_native">libtgwsproxy недоступна для этой ABI</string>
+    <string name="telegram_channel_name">Telegram WS-прокси</string>
+    <string name="telegram_channel_description">Локальный MTProto-прокси Telegram</string>
+    <string name="telegram_hint">Нажмите «Применить в Telegram» и подтвердите прокси. Если Telegram не открылся — скопируйте ссылку и добавьте вручную: Настройки → Данные и память → Прокси.</string>
+
+    <!-- Нижняя навигация -->
+    <string name="nav_home">Главная</string>
+    <string name="nav_telegram">Telegram</string>
+    <string name="nav_settings">Настройки</string>
+    <string name="nav_logs">Логи</string>
+
+</resources>

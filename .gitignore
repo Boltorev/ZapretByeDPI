@@ -1,0 +1,26 @@
+# Android Studio / IntelliJ
+.idea/
+*.iml
+local.properties
+
+# Сборка Gradle
+.gradle/
+build/
+app/build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Готовые APK/AAB
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ОС
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log

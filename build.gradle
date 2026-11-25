@@ -1,0 +1,16 @@
+// ---------------------------------------------------------------------------
+// Корневой build.gradle.
+//
+// Версии подобраны под:
+//   Gradle 8.10.2 (см. gradle/wrapper/gradle-wrapper.properties)
+//   Android Gradle Plugin 8.8.2
+//   Kotlin 2.1.0
+//   JDK 17+ (Android Studio использует встроенную JBR 17/21)
+//
+// Плагины подключаются с "apply false": в корне они только объявляют версию,
+// а активируются уже в app/build.gradle.
+// ---------------------------------------------------------------------------
+plugins {
+    id 'com.android.application' version '8.8.2' apply false
+    id 'org.jetbrains.kotlin.android' version '2.1.0' apply false
+}

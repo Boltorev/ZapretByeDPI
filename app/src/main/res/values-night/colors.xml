@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Тёмная тема: те же имена цветов, другие значения. -->
+    <color name="brand_green">#5FD39A</color>
+    <color name="brand_dark">#07110C</color>
+    <color name="brand_green_container">#123524</color>
+    <color name="brand_on_container">#D6F5E3</color>
+    <color name="launcher_background">#0B3D2E</color>
+
+    <color name="surface">#0C120E</color>
+    <color name="card">#151D18</color>
+    <color name="outline">#26332B</color>
+    <color name="text_primary">#E8F1EA</color>
+    <color name="text_secondary">#9DB0A2</color>
+
+    <color name="state_on">#5FD39A</color>
+    <color name="state_off">#EF6B6B</color>
+    <color name="state_busy">#F2B84B</color>
+
+    <color name="warning_bg">#2A2413</color>
+    <color name="warning_stroke">#5A4A1F</color>
+    <color name="warning_text">#F5D98B</color>
+
+    <color name="badge_bg">#1C2E24</color>
+    <color name="badge_text">#9FE3BE</color>
+
+    <color name="log_bg">#080D0A</color>
+    <color name="log_text">#9FE3BE</color>
+
+</resources>

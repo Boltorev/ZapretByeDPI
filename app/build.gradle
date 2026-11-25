@@ -1,0 +1,227 @@
+// ---------------------------------------------------------------------------
+// build.gradle модуля app — здесь настраивается само приложение.
+// ---------------------------------------------------------------------------
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    // namespace — пакет, в котором генерируются R и BuildConfig.
+    // Он же используется как package в манифесте (в manifest пакет не пишем).
+    namespace 'com.zapret.byedpi'
+    compileSdk 34
+    // Build-Tools не фиксируем: AGP 8.8 сам выберет 35.0.0.
+    ndkVersion "27.0.12077973"
+
+    defaultConfig {
+        applicationId "com.zapret.byedpi"
+        minSdk 26          // Android 8.0 — минимальная поддерживаемая версия
+        targetSdk 34       // Android 14
+        versionCode 15
+        versionName "0.6.2"
+
+        ndk {
+            // ABI, для которых собираются нативные части:
+            // arm64-v8a   — все современные телефоны;
+            // armeabi-v7a — старые 32-битные телефоны (он же «armeabi» в обиходе);
+            // x86, x86_64 — эмуляторы и редкие устройства.
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
+        }
+    }
+
+    // Публикационные сборки: отдельный APK на каждую ABI + universal.
+    // Файлы на выходе: app-<abi>-debug.apk и app-universal-debug.apk.
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
+            universalApk true
+        }
+    }
+
+    // hev-socks5-tunnel + наш JNI-мост собираются через ndk-build.
+    // Исходники лежат в app/src/main/jni/.
+    externalNativeBuild {
+        ndkBuild {
+            path "src/main/jni/Android.mk"
+        }
+    }
+
+    sourceSets {
+        main {
+            // Сюда Gradle-задача buildByeDpiExecutable кладёт libbyedpi.so,
+            // собранный CMake как ELF executable.
+            jniLibs.srcDir("$buildDir/generated/byedpiJniLibs")
+        }
+    }
+
+    buildTypes {
+        release {
+            // На этапе 2 обфускация не нужна: проще читать стектрейсы.
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        // AGP 8.x требует Java 17. Android Studio сама подставит нужный JDK.
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        // ViewBinding: вместо findViewById получаем типизированный binding.
+        viewBinding true
+    }
+
+    packaging {
+        // КРИТИЧНО для варианта A: libbyedpi.so — исполняемый файл.
+        // Он должен быть извлечён из APK в nativeLibraryDir, иначе
+        // ProcessBuilder не сможет его запустить.
+        jniLibs {
+            useLegacyPackaging true
+        }
+        resources {
+            excludes += ['/META-INF/{AL2.0,LGPL2.1}']
+        }
+    }
+}
+
+dependencies {
+    // База: Kotlin-расширения, AppCompat, Material 3, Activity Result API,
+    // Lifecycle + корутины для StateFlow и lifecycleScope.
+    //
+    // Версии AndroidX специально зафиксированы на середине 2024 года:
+    // они требуют compileSdk 34, а не 35. Если поставить более свежие
+    // activity/lifecycle, Gradle может потребовать compileSdk 35.
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.activity:activity-ktx:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.4'
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    // JNA нужен для вызова C-экспортов libtgwsproxy.so (Telegram MTProto→WS).
+    implementation 'net.java.dev.jna:jna:5.14.0@aar'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+
+    // ЭТАП 4: RecyclerView понадобится для списка приложений и доменов.
+    // Добавим зависимость тогда, когда появятся соответствующие экраны.
+}
+
+// ---------------------------------------------------------------------------
+// Сборка ByeDPI как ELF executable (вариант A).
+//
+// AGP не умеет паковать executables из своего externalNativeBuild, поэтому
+// вызываем NDK clang напрямую. Это тот же компилятор и те же флаги, что
+// использует CMake, но без прослойки Ninja (она в некоторых средах
+// зависает на compiler check). Результат — libbyedpi.so в
+// generated/byedpiJniLibs/<abi>/, откуда его забирает mergeJniLibFolders.
+//
+// CMakeLists.txt в src/main/cpp оставлен как альтернативный способ сборки.
+// ---------------------------------------------------------------------------
+def byedpiTargets = [
+        'arm64-v8a'  : 'aarch64-linux-android26',
+        'armeabi-v7a': 'armv7a-linux-androideabi26',
+        'x86'        : 'i686-linux-android26',
+        'x86_64'     : 'x86_64-linux-android26'
+]
+def byedpiGeneratedDir = layout.buildDirectory.dir('generated/byedpiJniLibs')
+
+tasks.register('buildByeDpiExecutable') {
+    group = 'build'
+    description = 'Собирает ByeDPI (ciadpi) как ELF executable под все ABI'
+
+    inputs.files(fileTree('src/main/cpp/byedpi') {
+        include '*.c'
+        include '*.h'
+    })
+    outputs.dir(byedpiGeneratedDir)
+
+    doLast {
+        def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+        def isMac = System.getProperty('os.name').toLowerCase().contains('mac')
+        def hostTag = isWindows ? 'windows-x86_64' : (isMac ? 'darwin-x86_64' : 'linux-x86_64')
+        def ndkDir = android.ndkDirectory
+        def toolchainBin = new File(ndkDir, "toolchains/llvm/prebuilt/${hostTag}/bin")
+        def sysroot = new File(ndkDir, "toolchains/llvm/prebuilt/${hostTag}/sysroot")
+        def clang = new File(toolchainBin, isWindows ? 'clang.exe' : 'clang')
+
+        if (!clang.isFile()) {
+            throw new GradleException(
+                "NDK clang не найден: ${clang}. Установите ndk;27.0.12077973")
+        }
+        if (!sysroot.isDirectory()) {
+            throw new GradleException("NDK sysroot не найден: ${sysroot}")
+        }
+
+        def byedpiDir = file('src/main/cpp/byedpi')
+        def sources = fileTree(byedpiDir) {
+            include '*.c'
+            exclude 'win_service.c'
+        }.files.sort { it.name }
+
+        if (sources.isEmpty()) {
+            throw new GradleException("Не найдены исходники ByeDPI в ${byedpiDir}")
+        }
+
+        def outRoot = byedpiGeneratedDir.get().asFile
+        project.delete(outRoot)
+
+        byedpiTargets.each { abi, target ->
+            def destDir = new File(outRoot, abi)
+            destDir.mkdirs()
+            def dest = new File(destDir, 'libbyedpi.so')
+            if (dest.exists()) dest.delete()
+
+            def args = [
+                    clang.absolutePath,
+                    "--target=${target}",
+                    "--sysroot=${sysroot.absolutePath}",
+                    '-D_GNU_SOURCE',
+                    '-D_DEFAULT_SOURCE',
+                    '-I', byedpiDir.absolutePath,
+                    '-std=c99',
+                    '-O2',
+                    '-Wall',
+                    '-Wno-unused',
+                    '-Wextra',
+                    '-Wno-unused-parameter',
+                    '-fPIE',
+                    '-pie',
+                    '-Wl,-z,max-page-size=16384',
+                    '-Wl,-z,common-page-size=16384',
+                    '-o', dest.absolutePath
+            ]
+            sources.each { args.add(it.absolutePath) }
+
+            project.exec {
+                workingDir project.projectDir
+                commandLine args
+            }
+
+            if (!dest.isFile()) {
+                throw new GradleException("ByeDPI executable не создан для ${abi}: ${dest}")
+            }
+            if (!isWindows) {
+                dest.setExecutable(true, false)
+            }
+            println "ByeDPI: ${abi} -> ${dest} (${dest.length()} байт)"
+        }
+    }
+}
+
+// Генерируемый jniLibs должен существовать до слияния нативных библиотек.
+tasks.named('preBuild').configure {
+    dependsOn('buildByeDpiExecutable')
+}
+tasks.configureEach { task ->
+    if (task.name.startsWith('merge') && task.name.endsWith('JniLibFolders')) {
+        task.dependsOn('buildByeDpiExecutable')
+    }
+}
