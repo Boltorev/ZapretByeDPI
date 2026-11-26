@@ -589,8 +589,13 @@ class ZapretVpnService : VpnService() {
                 val proxy = byeDpi
                 if (proxy == null) {
                     ProbeResult.fail(ProbeFailure.IO, "ciadpi не запущен")
-                } else if (host.endsWith("twimg.com")) {
-                    // Медиа X: рукопожатия мало, нужен реальный HTTP-ответ.
+                } else if (isXHost(host)) {
+                    /*
+                     * X проверяем данными, а не рукопожатием: в логах 0.6.2
+                     * и api.x.com, и медиа отдавали только серверный полёт
+                     * TLS (~340-530 байт) и закрывались, но startHandshake()
+                     * при этом проходил и ротации не было.
+                     */
                     proxy.probeHttpsResult(host, 443, 6_000)
                 } else {
                     val timeout = if (host.endsWith("x.com")) 3_000 else 6_000
@@ -610,6 +615,18 @@ class ZapretVpnService : VpnService() {
     private fun stopAutoRotator() {
         autoRotator?.stop()
         autoRotator = null
+    }
+
+    /**
+     * Хосты X/Twitter, для которых канарейка проверяет реальные данные
+     * (HTTP-ответ), а не только TLS-рукопожатие.
+     */
+    private fun isXHost(host: String): Boolean {
+        val lower = host.lowercase()
+        return lower.endsWith("x.com") ||
+            lower.endsWith("twitter.com") ||
+            lower.endsWith("t.co") ||
+            lower.endsWith("twimg.com")
     }
 
     /**
