@@ -33,6 +33,9 @@ class TelegramProxyService : Service() {
         /** Не перезапускать чаще, чем раз в 10 минут. */
         private const val RESTART_COOLDOWN_MS = 600_000L
 
+        /** Пул из 8; если активных вчетверо больше при нулевом трафике — они мёртвые. */
+        private const val STUCK_ACTIVE = 32
+
         @Volatile
         private var working = false
 
@@ -199,6 +202,7 @@ class TelegramProxyService : Service() {
         statsRunning = true
         thread(name = "tgws-stats", isDaemon = true) {
             var lastDown = -1L
+            var lastUp = -1L
             var lastProgressAt = System.currentTimeMillis()
             var lastTotal = -1L
             while (statsRunning && TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
@@ -213,43 +217,52 @@ class TelegramProxyService : Service() {
                 AppLog.i(TAG, "stats: $stats")
 
                 val down = parseBytes(statValue(stats, "down")) ?: continue
+                val up = parseBytes(statValue(stats, "up")) ?: 0L
                 val total = statValue(stats, "total")?.toLongOrNull() ?: -1L
                 val active = statValue(stats, "active")?.toIntOrNull() ?: 0
                 val now = System.currentTimeMillis()
 
                 val newConnections = total != lastTotal
+                val upGrew = up > lastUp
+                /*
+                 * Зависание — это когда клиент что-то отправил, а вниз
+                 * ничего не пришло. Тихий прокси с живым соединением
+                 * (Telegram просто молчит) зависанием не считаем, иначе
+                 * перезапускали бы его каждые 10 минут на ровном месте.
+                 *
+                 * Отдельный случай — распухший пул: active сильно больше
+                 * размера пула (8) при нулевом трафике, значит соединения
+                 * висят мёртвыми.
+                 */
+                val stuckPool = active >= STUCK_ACTIVE
                 when {
                     down > lastDown -> {
-                        // Данные идут — прокси живой.
                         lastDown = down
+                        lastUp = up
                         lastProgressAt = now
                     }
                     newConnections -> {
-                        // Появились новые соединения: даём им шанс, таймер с нуля.
+                        // Новые соединения: даём им шанс, таймер с нуля.
                         lastProgressAt = now
+                        lastUp = up
                     }
-                    active > 0 && now - lastProgressAt >= STALL_MS -> {
-                        /*
-                         * Активные соединения есть, новых нет, байты вниз
-                         * не растут: канал открыт, но трафик не идёт.
-                         * В логах 0.6.2 именно так выглядело «не работает
-                         * тг вс прокси»: cf>0, total растёт, down стоит.
-                         */
+                    (upGrew || stuckPool) && active > 0 &&
+                        now - lastProgressAt >= STALL_MS -> {
                         val stalledMs = now - lastProgressAt
                         if (now - lastRestartAt < RESTART_COOLDOWN_MS) {
                             AppLog.w(
                                 TAG,
-                                "watchdog: данные не идут ${stalledMs / 1000}с " +
-                                    "(active=$active, down=${statValue(stats, "down")}), " +
-                                    "перезапуск был недавно — жду"
+                                "watchdog: down стоит ${stalledMs / 1000}с, " +
+                                    "up=${statValue(stats, "up")}, active=$active — " +
+                                    "перезапуск был недавно, жду"
                             )
                         } else {
                             lastRestartAt = now
                             AppLog.w(
                                 TAG,
-                                "watchdog: данные не идут ${stalledMs / 1000}с " +
-                                    "(active=$active, total=$total, " +
-                                    "down=${statValue(stats, "down")}) — перезапуск прокси"
+                                "watchdog: down стоит ${stalledMs / 1000}с при " +
+                                    "up=${statValue(stats, "up")}, active=$active " +
+                                    "(total=$total) — перезапуск прокси"
                             )
                             statsRunning = false
                             restartAfterStall()
@@ -258,6 +271,7 @@ class TelegramProxyService : Service() {
                     }
                 }
                 lastTotal = total
+                if (up > lastUp) lastUp = up
             }
         }
     }
