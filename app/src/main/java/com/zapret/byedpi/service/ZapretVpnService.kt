@@ -108,6 +108,10 @@ class ZapretVpnService : VpnService() {
     @Volatile
     private var xIndex = 0
 
+    /** Вариант для медиа X (pbs/video/abs.twimg.com), ротируется отдельно. */
+    @Volatile
+    private var xMediaIndex = 0
+
     @Volatile
     private var userHosts: List<String> = emptyList()
 
@@ -299,6 +303,7 @@ class ZapretVpnService : VpnService() {
             ytApiIndex = AutoStateStore.load("yt").index
             discordIndex = AutoStateStore.load("dc").index
             xIndex = AutoStateStore.load("x").index
+            xMediaIndex = AutoStateStore.load("xm").index
             userHosts = DomainStore.load(this)
             AppLog.i(TAG, "Пользовательских доменов: ${userHosts.size}")
             val candidates = EngineConfig.strategies().map { strategy ->
@@ -308,6 +313,7 @@ class ZapretVpnService : VpnService() {
                         apiIndex = 0,
                         discordIndex = 0,
                         xIndex = xIndex,
+                        xMediaIndex = xMediaIndex,
                         userHosts = userHosts
                     )
                     "PER_HOST_YT_TLSREC" -> EngineConfig.hostRoutedStrategy(
@@ -315,6 +321,7 @@ class ZapretVpnService : VpnService() {
                         apiIndex = 0,
                         discordIndex = 0,
                         xIndex = xIndex,
+                        xMediaIndex = xMediaIndex,
                         userHosts = userHosts
                     )
                     else -> strategy
@@ -579,9 +586,16 @@ class ZapretVpnService : VpnService() {
         autoRotator?.stop()
         autoRotator = AutoRotator(
             check = { host ->
-                val timeout = if (host.endsWith("x.com")) 3_000 else 6_000
-                byeDpi?.probeTlsResult(host, 443, timeout)
-                    ?: ProbeResult.fail(ProbeFailure.IO, "ciadpi не запущен")
+                val proxy = byeDpi
+                if (proxy == null) {
+                    ProbeResult.fail(ProbeFailure.IO, "ciadpi не запущен")
+                } else if (host.endsWith("twimg.com")) {
+                    // Медиа X: рукопожатия мало, нужен реальный HTTP-ответ.
+                    proxy.probeHttpsResult(host, 443, 6_000)
+                } else {
+                    val timeout = if (host.endsWith("x.com")) 3_000 else 6_000
+                    proxy.probeTlsResult(host, 443, timeout)
+                }
             },
             onRotate = { key ->
                 try {
@@ -683,6 +697,7 @@ class ZapretVpnService : VpnService() {
                         apiIndex = ytApiIndex,
                         discordIndex = discordIndex,
                         xIndex = xIndex,
+                        xMediaIndex = xMediaIndex,
                         userHosts = userHosts
                     )
                 }
@@ -694,6 +709,7 @@ class ZapretVpnService : VpnService() {
                         apiIndex = ytApiIndex,
                         discordIndex = discordIndex,
                         xIndex = xIndex,
+                        xMediaIndex = xMediaIndex,
                         userHosts = userHosts
                     )
                 }
@@ -705,6 +721,19 @@ class ZapretVpnService : VpnService() {
                         apiIndex = ytApiIndex,
                         discordIndex = discordIndex,
                         xIndex = xIndex,
+                        xMediaIndex = xMediaIndex,
+                        userHosts = userHosts
+                    )
+                }
+                "xm" -> {
+                    xMediaIndex = (xMediaIndex + 1) % EngineConfig.xMediaVariantCount
+                    nextIndex = xMediaIndex
+                    next = EngineConfig.hostRoutedStrategy(
+                        mediaIndex = ytMediaIndex,
+                        apiIndex = ytApiIndex,
+                        discordIndex = discordIndex,
+                        xIndex = xIndex,
+                        xMediaIndex = xMediaIndex,
                         userHosts = userHosts
                     )
                 }
@@ -714,7 +743,7 @@ class ZapretVpnService : VpnService() {
             AppLog.w(
                 TAG,
                 "AUTO $key: ${current.name} -> index=$nextIndex " +
-                    "(yt api=$ytApiIndex, dc=$discordIndex, x=$xIndex)"
+                    "(yt api=$ytApiIndex, dc=$discordIndex, x=$xIndex, xm=$xMediaIndex)"
             )
 
             if (restartByeDpi(next)) {

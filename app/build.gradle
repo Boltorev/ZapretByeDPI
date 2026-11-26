@@ -18,8 +18,8 @@ android {
         applicationId "com.zapret.byedpi"
         minSdk 26          // Android 8.0 — минимальная поддерживаемая версия
         targetSdk 34       // Android 14
-        versionCode 15
-        versionName "0.6.2"
+        versionCode 16
+        versionName "0.6.3"
 
         ndk {
             // ABI, для которых собираются нативные части:

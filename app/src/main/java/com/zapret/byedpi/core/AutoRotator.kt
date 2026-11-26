@@ -5,15 +5,19 @@ import kotlin.concurrent.thread
 /**
  * Канарейка этапа 3.
  *
- * Раз в 45 секунд проверяет два ключа через локальный SOCKS5:
+ * Раз в 10 секунд проверяет ключи через локальный SOCKS5:
+ *   x  — api.x.com (API X/Twitter);
+ *   xm — pbs.twimg.com (медиа X: картинки и видео-плейлисты);
  *   yt — youtubei.googleapis.com (API YouTube);
  *   dc — discord.com.
  *
- * Если 4 проверки подряд (в окне 45 секунд) не прошли, вызывается onRotate.
- * Состояние пишется в autostate.yt / autostate.dc.
+ * `xm` появился после логов 0.6.2: `api.x.com` проходит TLS-рукопожатие
+ * на любой стратегии (он за Cloudflare), а медиа-хосты на Fastly отдают
+ * только серверный полёт и закрываются. Из-за этого ротатор считал X
+ * рабочим, хотя картинки и комментарии не грузились. Проверка `xm` идёт
+ * с реальным HTTP-запросом (см. ByeDpiProcess.probeHttpsResult).
  *
- * Это упрощённый аналог circular из zapret2 и SiteCheckUtils из ByeByeDPI:
- * проверяем реальный HTTP-ответ через ciadpi, а не только открытие порта.
+ * Порог: X перебирается быстрее (2), остальные — 4 отказа в окне 60 с.
  */
 class AutoRotator(
     private val check: (String) -> ProbeResult,
@@ -29,8 +33,10 @@ class AutoRotator(
         private data class Check(val key: String, val host: String, val threshold: Int)
 
         private val checks = listOf(
-            // X перебираем быстрее: там 5 вариантов, и пользователь ждёт.
+            // X перебираем быстрее: там 6 вариантов, и пользователь ждёт.
             Check("x", "api.x.com", 2),
+            // Медиа X проверяем отдельно: именно оно ломается чаще всего.
+            Check("xm", "pbs.twimg.com", 2),
             Check("yt", "youtubei.googleapis.com", FAILS_THRESHOLD),
             Check("dc", "discord.com", FAILS_THRESHOLD)
         )
@@ -38,6 +44,8 @@ class AutoRotator(
         /**
          * nld=2: ключ по последним двум меткам домена, но YouTube/Discord
          * сводим в отдельные ключи, чтобы их ротация не пересекалась.
+         * twimg.com — отдельный ключ `xm`: медиа X ротируется независимо
+         * от API X.
          */
         fun keyForHost(host: String): String {
             val lower = host.lowercase()
@@ -50,10 +58,10 @@ class AutoRotator(
                     lower.endsWith("discordapp.com") ||
                     lower.endsWith("discord.gg") ||
                     lower.endsWith("discord.media") -> "dc"
+                lower.endsWith("twimg.com") -> "xm"
                 lower.endsWith("x.com") ||
                     lower.endsWith("twitter.com") ||
-                    lower.endsWith("t.co") ||
-                    lower.endsWith("twimg.com") -> "x"
+                    lower.endsWith("t.co") -> "x"
                 else -> lower.split('.').takeLast(2).joinToString(".")
             }
         }

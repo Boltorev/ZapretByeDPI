@@ -27,6 +27,12 @@ class TelegramProxyService : Service() {
         private const val CHANNEL_ID = "tg_ws_proxy"
         private const val NOTIFICATION_ID = 42
 
+        /** Сколько секунд без прироста `down` считаем зависанием. */
+        private const val STALL_MS = 90_000L
+
+        /** Не перезапускать чаще, чем раз в 10 минут. */
+        private const val RESTART_COOLDOWN_MS = 600_000L
+
         @Volatile
         private var working = false
 
@@ -52,6 +58,10 @@ class TelegramProxyService : Service() {
             }
         }
     }
+
+    /** Когда watchdog последний раз перезапускал прокси (антидребезг). */
+    @Volatile
+    private var lastRestartAt = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -188,6 +198,9 @@ class TelegramProxyService : Service() {
         if (statsRunning) return
         statsRunning = true
         thread(name = "tgws-stats", isDaemon = true) {
+            var lastDown = -1L
+            var lastProgressAt = System.currentTimeMillis()
+            var lastTotal = -1L
             while (statsRunning && TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
                 try {
                     Thread.sleep(15_000L)
@@ -195,9 +208,100 @@ class TelegramProxyService : Service() {
                     break
                 }
                 if (!statsRunning) break
-                TelegramNative.stats()?.let { AppLog.i(TAG, "stats: $it") }
+
+                val stats = TelegramNative.stats() ?: continue
+                AppLog.i(TAG, "stats: $stats")
+
+                val down = parseBytes(statValue(stats, "down")) ?: continue
+                val total = statValue(stats, "total")?.toLongOrNull() ?: -1L
+                val active = statValue(stats, "active")?.toIntOrNull() ?: 0
+                val now = System.currentTimeMillis()
+
+                val newConnections = total != lastTotal
+                when {
+                    down > lastDown -> {
+                        // Данные идут — прокси живой.
+                        lastDown = down
+                        lastProgressAt = now
+                    }
+                    newConnections -> {
+                        // Появились новые соединения: даём им шанс, таймер с нуля.
+                        lastProgressAt = now
+                    }
+                    active > 0 && now - lastProgressAt >= STALL_MS -> {
+                        /*
+                         * Активные соединения есть, новых нет, байты вниз
+                         * не растут: канал открыт, но трафик не идёт.
+                         * В логах 0.6.2 именно так выглядело «не работает
+                         * тг вс прокси»: cf>0, total растёт, down стоит.
+                         */
+                        val stalledMs = now - lastProgressAt
+                        if (now - lastRestartAt < RESTART_COOLDOWN_MS) {
+                            AppLog.w(
+                                TAG,
+                                "watchdog: данные не идут ${stalledMs / 1000}с " +
+                                    "(active=$active, down=${statValue(stats, "down")}), " +
+                                    "перезапуск был недавно — жду"
+                            )
+                        } else {
+                            lastRestartAt = now
+                            AppLog.w(
+                                TAG,
+                                "watchdog: данные не идут ${stalledMs / 1000}с " +
+                                    "(active=$active, total=$total, " +
+                                    "down=${statValue(stats, "down")}) — перезапуск прокси"
+                            )
+                            statsRunning = false
+                            restartAfterStall()
+                            return@thread
+                        }
+                    }
+                }
+                lastTotal = total
             }
         }
+    }
+
+    /**
+     * Перезапускает нативный прокси, не убивая службу: сначала StopProxy,
+     * потом обычный путь запуска (он сам поднимет новый stats-логгер).
+     */
+    private fun restartAfterStall() {
+        try {
+            TelegramNative.stats()?.let { AppLog.i(TAG, "stats before restart: $it") }
+            TelegramNative.stopProxy()
+        } catch (t: Throwable) {
+            AppLog.w(TAG, "watchdog: StopProxy: ${t.message}")
+        }
+        TelegramRuntime.update { it.copy(phase = TelegramPhase.STOPPED) }
+        try {
+            Thread.sleep(1_000L)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        startProxy()
+    }
+
+    private fun statValue(stats: String, key: String): String? =
+        Regex("(?:^|\\s)${Regex.escape(key)}=([^\\s]+)").find(stats)?.groupValues?.get(1)
+
+    /**
+     * Превращает `2.8MB` / `234.9KB` / `0.0B` из статистики в байты.
+     * Формат задаёт нативная библиотека, поэтому разбираем аккуратно:
+     * не распознали — считаем, что данных нет.
+     */
+    private fun parseBytes(value: String?): Long? {
+        if (value == null) return null
+        val match = Regex("^([0-9]+(?:[.,][0-9]+)?)([BKMGT]?)B?$").find(value.trim()) ?: return null
+        val number = match.groupValues[1].replace(',', '.').toDoubleOrNull() ?: return null
+        val multiplier = when (match.groupValues[2]) {
+            "K" -> 1024.0
+            "M" -> 1024.0 * 1024.0
+            "G" -> 1024.0 * 1024.0 * 1024.0
+            "T" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+            else -> 1.0
+        }
+        return (number * multiplier).toLong()
     }
 
     private fun updateNotification(text: String) {

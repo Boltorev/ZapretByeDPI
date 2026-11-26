@@ -347,26 +347,48 @@ object EngineConfig {
      * X/Twitter. `-s 1` оказался недостаточным: соединение устанавливается,
      * но ответа нет. Перебираем OOB/TLS-record/disorder-варианты, пока
      * canary `api.x.com` не начнёт проходить TLS.
+     *
+     * Порядок переставлен после логов 0.6.2: fake (`-f -1:11 -t 8`) на
+     * `api.x.com` проходит рукопожатие (он за Cloudflare), а на медиа-хостах
+     * отдаёт только серверный полёт и закрывается. Поэтому fake — последним.
      */
     private val xVariants = listOf(
         listOf("-o", "3+s"),
         listOf("-r", "3+s"),
         listOf("-d", "1"),
-        listOf("-f", "-1:11", "-t", "8", "-Q", "rand",
-            "-n", "www.google.com", "-n", "www.microsoft.com"),
+        listOf("-s", "1"),
         listOf("-s", "1+s", "-d", "1+s"),
-        listOf("-s", "1")
+        listOf("-f", "-1:11", "-t", "8", "-Q", "rand",
+            "-n", "www.google.com", "-n", "www.microsoft.com")
     )
 
-    /** X/Twitter: тот же split-1, что и для Discord; общий fallback их не берёт. */
-    private val xHosts = listOf(
+    /**
+     * Медиа X (картинки, видео, аватарки). Отдельный набор вариантов:
+     * в логах 0.6.2 именно эти хосты отдавали ~530 байт и закрывались,
+     * хотя API при этом «работал». Ротируются независимо от API X.
+     */
+    private val xMediaVariants = listOf(
+        listOf("-o", "3+s"),
+        listOf("-s", "1"),
+        listOf("-r", "3+s"),
+        listOf("-d", "1"),
+        listOf("-f", "-1:11", "-t", "8", "-Q", "rand",
+            "-n", "www.google.com", "-n", "www.microsoft.com")
+    )
+
+    /** API и веб X/Twitter. */
+    private val xApiHosts = listOf(
         "x.com",
         "api.x.com",
         "mobile.x.com",
         "twitter.com",
         "api.twitter.com",
         "mobile.twitter.com",
-        "t.co",
+        "t.co"
+    )
+
+    /** Медиа X: картинки, видео, статика. */
+    private val xMediaHosts = listOf(
         "twimg.com",
         "pbs.twimg.com",
         "video.twimg.com",
@@ -377,6 +399,7 @@ object EngineConfig {
     val apiVariantCount: Int get() = apiVariants.size
     val discordVariantCount: Int get() = discordVariants.size
     val xVariantCount: Int get() = xVariants.size
+    val xMediaVariantCount: Int get() = xMediaVariants.size
 
     /**
      * Собирает per-host стратегию с выбранными вариантами групп.
@@ -387,12 +410,14 @@ object EngineConfig {
         apiIndex: Int = 0,
         discordIndex: Int = 0,
         xIndex: Int = 0,
+        xMediaIndex: Int = 0,
         userHosts: List<String> = emptyList()
     ): Strategy {
         val media = mediaVariants[mediaIndex.mod(mediaVariants.size)]
         val api = apiVariants[apiIndex.mod(apiVariants.size)]
         val discord = discordVariants[discordIndex.mod(discordVariants.size)]
         val x = xVariants[xIndex.mod(xVariants.size)]
+        val xm = xMediaVariants[xMediaIndex.mod(xMediaVariants.size)]
 
         val options = mutableListOf<String>()
         fun host(name: String, opts: List<String>) {
@@ -413,8 +438,11 @@ object EngineConfig {
         host("discord.gg", discord)
         host("discord.media", discord)
 
-        for (name in xHosts) {
+        for (name in xApiHosts) {
             host(name, x)
+        }
+        for (name in xMediaHosts) {
+            host(name, xm)
         }
 
         // Пользовательские домены: отдельная группа перед общим fallback.

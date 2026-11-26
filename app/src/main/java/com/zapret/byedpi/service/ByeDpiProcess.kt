@@ -353,6 +353,147 @@ class ByeDpiProcess(private val context: Context) {
         }
     }
 
+    /**
+     * Более строгая проверка, чем [probeTlsResult]: после TLS-рукопожатия
+     * реально запрашивает страницу и требует, чтобы пришли данные.
+     *
+     * Зачем: в логах 0.6.2 X отдавал ровно серверный полёт TLS (~530 байт)
+     * и закрывался — рукопожатие проходило, а картинки/видео/комментарии
+     * не приходили. Канарейка на одном `startHandshake()` считала такую
+     * стратегию рабочей и не ротировала.
+     *
+     * Порядок: DNS → SOCKS5 к IP → TLS с SNI → HTTP GET → читаем ответ.
+     * Если ответа нет или он не похож на HTTP — [ProbeFailure.NO_DATA].
+     */
+    fun probeHttpsResult(
+        host: String,
+        port: Int = 443,
+        timeoutMs: Int = 6_000,
+        path: String = "/"
+    ): ProbeResult {
+        val dns = DnsResolver.resolve(host, timeoutMs.coerceAtMost(1_800))
+        if (!dns.ok) {
+            AppLog.w(TAG, "HTTP probe $host: DNS не разрешил (${dns.source}: ${dns.error})")
+            return ProbeResult.fail(ProbeFailure.DNS, dns.error ?: "DNS failed")
+        }
+
+        val addresses = dns.addresses
+            .filter { it.address.size == 4 }
+            .ifEmpty { dns.addresses }
+
+        var last: ProbeResult? = null
+        for (address in addresses) {
+            var raw: Socket? = null
+            var ssl: SSLSocket? = null
+            try {
+                raw = Socket(
+                    Proxy(
+                        Proxy.Type.SOCKS,
+                        InetSocketAddress(EngineConfig.SOCKS_HOST, EngineConfig.SOCKS_PORT)
+                    )
+                )
+                raw.connect(InetSocketAddress(address, port), timeoutMs)
+                raw.soTimeout = timeoutMs
+
+                val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+                ssl = factory.createSocket(raw, host, port, true) as SSLSocket
+                ssl.soTimeout = timeoutMs
+                ssl.sslParameters = ssl.sslParameters.apply {
+                    endpointIdentificationAlgorithm = "HTTPS"
+                }
+                ssl.startHandshake()
+
+                val request = "GET $path HTTP/1.1\r\n" +
+                    "Host: $host\r\n" +
+                    "User-Agent: ZapretByeDPI-check\r\n" +
+                    "Accept: */*\r\n" +
+                    "Connection: close\r\n\r\n"
+                ssl.outputStream.write(request.toByteArray(Charsets.ISO_8859_1))
+                ssl.outputStream.flush()
+
+                val response = readHttpHead(ssl, maxBytes = 2048)
+                if (response.isEmpty()) {
+                    last = ProbeResult.fail(ProbeFailure.NO_DATA, "нет ответа после рукопожатия")
+                    AppLog.d(TAG, "HTTP probe $host:$port via $address -> NO_DATA")
+                } else {
+                    val head = String(response, Charsets.ISO_8859_1)
+                    val code = parseStatusCode(head)
+                    if (code == null) {
+                        last = ProbeResult.fail(
+                            ProbeFailure.NO_DATA,
+                            "ответ не похож на HTTP: ${head.take(40)}"
+                        )
+                    } else {
+                        AppLog.d(
+                            TAG,
+                            "HTTP probe $host:$port -> HTTP $code, ${response.size} байт " +
+                                "(${dns.source}, ip=$address)"
+                        )
+                        return ProbeResult.ok(code)
+                    }
+                }
+            } catch (t: Throwable) {
+                last = classifyProbeFailure(t)
+                AppLog.d(
+                    TAG,
+                    "HTTP probe $host:$port failed via $address: " +
+                        "${last.failure} ${t.javaClass.simpleName}: ${t.message}"
+                )
+            } finally {
+                try {
+                    ssl?.close()
+                } catch (_: IOException) {
+                }
+                try {
+                    raw?.close()
+                } catch (_: IOException) {
+                }
+            }
+        }
+
+        return last ?: ProbeResult.fail(ProbeFailure.DNS, "no address")
+    }
+
+    /**
+     * Дочитывает начало HTTP-ответа: заголовки или хотя бы первые байты.
+     * Возвращает пустой массив, если сервер закрыл соединение молча.
+     */
+    private fun readHttpHead(ssl: SSLSocket, maxBytes: Int): ByteArray {
+        val buffer = ByteArray(maxBytes)
+        var total = 0
+        val deadline = System.currentTimeMillis() + 4_000
+        try {
+            while (total < maxBytes && System.currentTimeMillis() < deadline) {
+                val read = ssl.inputStream.read(buffer, total, maxBytes - total)
+                if (read <= 0) break
+                total += read
+                // Заголовки закончились — дальше тело нам не нужно.
+                if (containsHeaderEnd(buffer, total)) break
+            }
+        } catch (e: SocketTimeoutException) {
+            // Успели прочитать часть — вернём её; иначе пусто = NO_DATA.
+            AppLog.d(TAG, "HTTP probe: таймаут чтения, получено $total байт")
+        } catch (_: SocketException) {
+        }
+        return if (total == 0) ByteArray(0) else buffer.copyOf(total)
+    }
+
+    private fun containsHeaderEnd(buffer: ByteArray, length: Int): Boolean {
+        for (i in 3 until length) {
+            if (buffer[i - 3] == 13.toByte() && buffer[i - 2] == 10.toByte() &&
+                buffer[i - 1] == 13.toByte() && buffer[i] == 10.toByte()
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun parseStatusCode(head: String): Int? {
+        val match = Regex("^HTTP/\\d(?:\\.\\d)? (\\d{3})").find(head.trim())
+        return match?.groupValues?.getOrNull(1)?.toIntOrNull()
+    }
+
     fun stop() {
         stopping = true
         val p = process

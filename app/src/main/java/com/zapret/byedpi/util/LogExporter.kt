@@ -93,6 +93,7 @@ object LogExporter {
             appendLine("autostate.yt: ${Prefs.getString("autostate.yt")}")
             appendLine("autostate.dc: ${Prefs.getString("autostate.dc")}")
             appendLine("autostate.x: ${Prefs.getString("autostate.x")}")
+            appendLine("autostate.xm: ${Prefs.getString("autostate.xm")}")
             appendLine("error: ${state.errorMessage}")
             appendLine("ipv6 enabled: ${VpnConfig.ENABLE_IPV6}")
             appendLine("per-app mode: ${AppRules.mode()}")

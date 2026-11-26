@@ -8,6 +8,9 @@ enum class ProbeFailure {
     RESET,
     TLS,
     IO,
+
+    /** TLS-рукопожатие прошло, но данных в ответе нет — типичный признак DPI. */
+    NO_DATA,
     HTTP
 }
 
@@ -20,11 +23,16 @@ data class ProbeResult(
     val isNetworkProblem: Boolean
         get() = failure == ProbeFailure.DNS || failure == ProbeFailure.ROUTE
 
+    /**
+     * NO_DATA тоже считается провалом стратегии, а не сети: рукопожатие
+     * прошло, значит маршрут и TLS живы, а полезные данные не доходят.
+     */
     val isDpiProblem: Boolean
         get() = failure == ProbeFailure.TIMEOUT ||
             failure == ProbeFailure.RESET ||
             failure == ProbeFailure.TLS ||
-            failure == ProbeFailure.IO
+            failure == ProbeFailure.IO ||
+            failure == ProbeFailure.NO_DATA
 
     companion object {
         fun ok(code: Int? = null): ProbeResult =
