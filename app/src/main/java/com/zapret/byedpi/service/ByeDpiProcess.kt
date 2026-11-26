@@ -284,8 +284,17 @@ class ByeDpiProcess(private val context: Context) {
      * Проверяет TLS через SOCKS5, но резолвит хост самим приложением и
      * подключается к уже полученному IP. Так системный DNS/ciadpi не может
      * превратить нормальную стратегию в «not resolved».
+     *
+     * @param maxAddresses сколько IP пробовать. По умолчанию 2: на мобильных
+     * сетях, где Google режут целиком, перебор всех 8 адресов по 5 с давал
+     * ~40 с на один хост, и старт выглядел «бесконечным».
      */
-    fun probeTlsResult(host: String, port: Int, timeoutMs: Int = 6_000): ProbeResult {
+    fun probeTlsResult(
+        host: String,
+        port: Int,
+        timeoutMs: Int = 6_000,
+        maxAddresses: Int = 2
+    ): ProbeResult {
         val dns = DnsResolver.resolve(host, timeoutMs.coerceAtMost(1_800))
         if (!dns.ok) {
             AppLog.w(TAG, "HTTPS probe $host: DNS не разрешил (${dns.source}: ${dns.error})")
@@ -295,6 +304,7 @@ class ByeDpiProcess(private val context: Context) {
         val addresses = dns.addresses
             .filter { it.address.size == 4 }
             .ifEmpty { dns.addresses }
+            .take(maxAddresses.coerceAtLeast(1))
 
         var last: ProbeResult? = null
         for (address in addresses) {
@@ -369,7 +379,8 @@ class ByeDpiProcess(private val context: Context) {
         host: String,
         port: Int = 443,
         timeoutMs: Int = 6_000,
-        path: String = "/"
+        path: String = "/",
+        maxAddresses: Int = 2
     ): ProbeResult {
         val dns = DnsResolver.resolve(host, timeoutMs.coerceAtMost(1_800))
         if (!dns.ok) {
@@ -380,6 +391,7 @@ class ByeDpiProcess(private val context: Context) {
         val addresses = dns.addresses
             .filter { it.address.size == 4 }
             .ifEmpty { dns.addresses }
+            .take(maxAddresses.coerceAtLeast(1))
 
         var last: ProbeResult? = null
         for (address in addresses) {

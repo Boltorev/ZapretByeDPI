@@ -68,6 +68,17 @@ class ZapretVpnService : VpnService() {
 
         /** Пауза между попытками establish(). */
         private const val ESTABLISH_RETRY_DELAY_MS = 700L
+
+        /**
+         * Бюджет времени на весь перебор стратегий при старте.
+         * Дальше стартуем fallback: лучше быстро получить рабочий туннель
+         * и дать AutoRotator подобрать вариант, чем минутами показывать
+         * «Подключение…».
+         */
+        private const val SCAN_BUDGET_MS = 40_000L
+
+        /** Таймаут одной TLS-пробы во время перебора (2 адреса на хост). */
+        private const val SELECT_PROBE_TIMEOUT_MS = 3_000
     }
 
     private var tunnel: ParcelFileDescriptor? = null
@@ -351,18 +362,45 @@ class ZapretVpnService : VpnService() {
                 }
             }
 
+            /*
+             * Перебор ограничен по времени. Раньше при жёстко заблокированном
+             * Google каждый кандидат тратил ~45 с (8 IP × 5 с на один хост),
+             * и 9 кандидатов давали ~7 минут «бесконечного запуска»
+             * (лог 0.6.3, cellular). Теперь проба берёт 2 адреса по 3 с,
+             * а весь перебор укладывается в SCAN_BUDGET_MS; если ничего
+             * не нашлось — стартуем fallback и даём работать AutoRotator.
+             */
+            val scanStartedAt = System.currentTimeMillis()
+            var candidateNo = 0
+            var scanTimedOut = false
             for (strategy in candidates) {
                 if (stopping) return
+                candidateNo++
+                if (System.currentTimeMillis() - scanStartedAt > SCAN_BUDGET_MS) {
+                    scanTimedOut = true
+                    AppLog.w(
+                        TAG,
+                        "Перебор остановлен по времени (${SCAN_BUDGET_MS / 1000} с, " +
+                            "проверено $candidateNo из ${candidates.size}). " +
+                            "Пробую fallback, дальше подхватит AutoRotator."
+                    )
+                    break
+                }
 
                 val proxy = ByeDpiProcess(this)
                 proxy.onUnexpectedExit = { code ->
                     onEngineFailed("ciadpi завершился сам (code=$code)")
                 }
+                // Прогресс в карточке состояния: видно, что перебор идёт,
+                // а не «зависло на подключении».
+                VpnRuntime.update {
+                    it.copy(presetName = "Проверка $candidateNo/${candidates.size}")
+                }
 
                 try {
                     AppLog.i(
                         TAG,
-                        "Пробуем ${strategy.name}: " +
+                        "Пробуем $candidateNo/${candidates.size} ${strategy.name}: " +
                             EngineConfig.argsPreview(strategy, protectArg, quicFakePath)
                     )
                     proxy.start(EngineConfig.byedpiArgs(strategy, protectArg, quicFakePath))
@@ -390,10 +428,14 @@ class ZapretVpnService : VpnService() {
                      * PER_HOST_YT выбирается по API: для медиа у него
                      * отдельная группа SPLIT1 + QUIC fake.
                      */
-                    val mediaResult = proxy.probeTlsResult("redirector.googlevideo.com", 443, 5_000)
+                    val mediaResult = proxy.probeTlsResult(
+                        "redirector.googlevideo.com", 443, SELECT_PROBE_TIMEOUT_MS
+                    )
                     val perHost = strategy.name.startsWith("PER_HOST_YT")
                     val apiResult = if (perHost || mediaResult.ok) {
-                        proxy.probeTlsResult("youtubei.googleapis.com", 443, 5_000)
+                        proxy.probeTlsResult(
+                            "youtubei.googleapis.com", 443, SELECT_PROBE_TIMEOUT_MS
+                        )
                     } else {
                         ProbeResult.fail(ProbeFailure.TIMEOUT, "media failed")
                     }
@@ -453,8 +495,10 @@ class ZapretVpnService : VpnService() {
                 val fallback = EngineConfig.fallbackStrategy()
                 AppLog.w(
                     TAG,
-                    "Ни одна стратегия не прошла TLS-пробу YouTube. " +
-                        "Запускаем ${fallback.name} как fallback."
+                    "Ни одна стратегия не прошла TLS-пробу YouTube" +
+                        (if (scanTimedOut) " (перебор прерван по таймауту)" else "") +
+                        ". Запускаем ${fallback.name} как fallback, " +
+                        "дальше подбор продолжит AutoRotator."
                 )
                 val proxy = ByeDpiProcess(this)
                 proxy.onUnexpectedExit = { code ->
