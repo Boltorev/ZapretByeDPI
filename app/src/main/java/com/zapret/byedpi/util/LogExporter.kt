@@ -13,6 +13,7 @@ import com.zapret.byedpi.core.Prefs
 import com.zapret.byedpi.core.VpnConfig
 import com.zapret.byedpi.core.VpnRuntime
 import com.zapret.byedpi.nativebridge.HevBridge
+import com.zapret.byedpi.telegram.TelegramPrefs
 import com.zapret.byedpi.telegram.TelegramRuntime
 import java.io.File
 import java.io.RandomAccessFile
@@ -114,6 +115,8 @@ object LogExporter {
             appendLine("user hosts: ${DomainStore.load(context).size}")
             val telegram = TelegramRuntime.state.value
             appendLine("telegram: ${telegram.phase} port=${telegram.port} error=${telegram.error}")
+            appendLine("telegram channel: ${telegram.channel}")
+            appendLine("telegram secure(443): ${TelegramPrefs.secure()} cf: ${TelegramPrefs.cfEnabled()}")
             appendLine()
 
             appendLine("=== hev / native ===")
@@ -156,6 +159,39 @@ object LogExporter {
 
             appendLine("=== hev.log (хвост) ===")
             appendLine(readTail(File(context.filesDir, "hev.log")))
+            appendLine()
+
+            /*
+             * Нативные логи libtgwsproxy. Библиотека пишет и в stderr, и в
+             * logcat с тегом TgWsProxy; Android отдаёт приложению только его
+             * собственные записи. Если производитель это запрещает — секция
+             * просто останется пустой, на работу это не влияет.
+             *
+             * Именно здесь видно, почему прокси не работает у оператора:
+             * «CF fail ...», «handshake 429», «ws tls fail ...», «все CF домены
+             * недоступны».
+             */
+            appendLine("=== TgWsProxy (logcat, хвост) ===")
+            appendLine(readNativeLog())
+        }
+    }
+
+    /** Best-effort чтение нативного лога: `logcat -d -s TgWsProxy`. */
+    private fun readNativeLog(maxLines: Int = 600): String {
+        return try {
+            val process = ProcessBuilder(
+                "logcat", "-d", "-v", "time", "-s", "TgWsProxy"
+            ).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            process.waitFor()
+            val lines = output.lines().filter { it.isNotBlank() }
+            if (lines.isEmpty()) {
+                "(нет записей TgWsProxy: logcat недоступен или прокси не запускался)"
+            } else {
+                lines.takeLast(maxLines).joinToString("\n")
+            }
+        } catch (t: Throwable) {
+            "(logcat недоступен: ${t.message})"
         }
     }
 

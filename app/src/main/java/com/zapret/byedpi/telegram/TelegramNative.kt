@@ -77,6 +77,23 @@ object TelegramNative {
 
     fun stopProxy(): Int = loaded?.StopProxy() ?: -100
 
+    /**
+     * Транспорт до Cloudflare и дата-центров.
+     *
+     * `disableSecure = true` — порт 80 без TLS, `false` — TLS на 443.
+     * Библиотека по умолчанию сидит на порту 80, но у Cloudflare этот
+     * путь сейчас не отвечает (см. TelegramPrefs.KEY_SECURE). Вызывать
+     * обязательно до StartProxy: настройка читается при каждом коннекте.
+     */
+    fun setDisableSecure(disableSecure: Boolean) {
+        val lib = loaded ?: return
+        try {
+            lib.SetDisableSecure(if (disableSecure) 1 else 0)
+        } catch (t: Throwable) {
+            AppLog.w(TAG, "SetDisableSecure: ${t.message}")
+        }
+    }
+
     fun configurePool(poolSize: Int, cacheDir: String, cfEnabled: Boolean) {
         val lib = loaded ?: return
         try {

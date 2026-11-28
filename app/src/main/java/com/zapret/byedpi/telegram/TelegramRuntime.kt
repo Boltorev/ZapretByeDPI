@@ -17,7 +17,13 @@ data class TelegramState(
     val port: Int = TelegramPrefs.DEFAULT_PORT,
     /** Полный секрет с префиксом dd/ee, пригодный для tg://proxy. */
     val secret: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * Через что сейчас ходит прокси: `Cloudflare TLS 443`, `Cloudflare HTTP 80`
+     * или `напрямую`. Видно в UI и в отчёте: по этому полю сразу понятно,
+     * какой канал проверял тестировщик.
+     */
+    val channel: String? = null
 )
 
 object TelegramRuntime {

@@ -8,6 +8,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -25,16 +29,25 @@ class TelegramProxyService : Service() {
     companion object {
         const val ACTION_START = "com.zapret.byedpi.telegram.START"
         const val ACTION_STOP = "com.zapret.byedpi.telegram.STOP"
+        const val ACTION_SWITCH = "com.zapret.byedpi.telegram.SWITCH"
 
         private const val TAG = "TelegramProxy"
         private const val CHANNEL_ID = "tg_ws_proxy"
         private const val NOTIFICATION_ID = 42
 
-        /** Сколько секунд без прироста `down` считаем зависанием. */
-        private const val STALL_MS = 90_000L
+        /**
+         * Сколько секунд без прироста `down` считаем зависанием.
+         *
+         * Раньше таймер сбрасывался на каждом новом соединении, и на мобильном
+         * интернете это давало вечный «застой»: Telegram переподключается
+         * быстрее, чем истекает окно, данные при этом не идут, а watchdog молчит
+         * (в логе 0.6.2 — 47 висящих соединений и 32 минуты без единого байта
+         * вниз). Теперь прогресс — только реальные байты вниз.
+         */
+        private const val STALL_MS = 60_000L
 
-        /** Не перезапускать чаще, чем раз в 10 минут. */
-        private const val RESTART_COOLDOWN_MS = 600_000L
+        /** Не перезапускать чаще, чем раз в минуту. */
+        private const val RESTART_COOLDOWN_MS = 60_000L
 
         /** Пул из 8; если активных вчетверо больше при нулевом трафике — они мёртвые. */
         private const val STUCK_ACTIVE = 32
@@ -44,6 +57,19 @@ class TelegramProxyService : Service() {
 
         /** Застои, разнесённые дальше этого окна, считаются заново. */
         private const val STALL_RESET_MS = 30 * 60_000L
+
+        /**
+         * Пропуск между опросами статистики больше этого означает, что систему
+         * заморозила (Doze / агрессивная экономия Xiaomi). Это не застой канала,
+         * перезапускать прокси из-за него не нужно.
+         */
+        private const val FREEZE_GAP_MS = 150_000L
+
+        /**
+         * Сколько байт вниз должен отдать канал, чтобы считать его рабочим
+         * и запомнить выбор транспорта для следующего запуска.
+         */
+        private const val GOOD_DOWNLOAD_BYTES = 400_000L
 
         @Volatile
         private var working = false
@@ -69,13 +95,37 @@ class TelegramProxyService : Service() {
                 context.stopService(Intent(context, TelegramProxyService::class.java))
             }
         }
+
+        /**
+         * Переключить транспорт Cloudflare (TLS 443 ↔ HTTP 80).
+         *
+         * На разных операторах «работает» разный канал: у кого-то режут
+         * TLS по SNI, у кого-то — HTTP на 80. Кнопка даёт тестировщику
+         * проверить второй канал за пару секунд, не дожидаясь watchdog.
+         */
+        fun switchChannel(context: Context) {
+            val intent = Intent(context, TelegramProxyService::class.java)
+                .setAction(ACTION_SWITCH)
+            try {
+                context.startService(intent)
+            } catch (t: Throwable) {
+                AppLog.w(TAG, "Переключение канала: ${t.message}")
+            }
+        }
     }
 
     /** Когда watchdog последний раз перезапускал прокси (антидребезг). */
     @Volatile
     private var lastRestartAt = 0L
 
-    /** Сколько подряд застоев: со второго пробуем другой канал Cloudflare. */
+    /**
+     * Номер поколения stats-потока: после перезапуска старый поток обязан
+     * выйти, иначе два потока начнут дублировать опросы и перезапуски.
+     */
+    @Volatile
+    private var statsGeneration = 0
+
+    /** Сколько подряд застоев: со второго пробуем другой транспорт CF. */
     @Volatile
     private var stallCount = 0
 
@@ -86,6 +136,17 @@ class TelegramProxyService : Service() {
     @Volatile
     private var cfOverride: Boolean? = null
 
+    /** Переопределение транспорта (TLS/HTTP) только на текущий запуск службы. */
+    @Volatile
+    private var secureOverride: Boolean? = null
+
+    /** Что реально применено к нативной библиотеке прямо сейчас. */
+    @Volatile
+    private var effectiveSecure = true
+
+    @Volatile
+    private var effectiveCf = true
+
     /** Момент, когда прокси поднялся: нужен для подсказки «Telegram не подключается». */
     @Volatile
     private var proxyStartedAt = 0L
@@ -93,12 +154,22 @@ class TelegramProxyService : Service() {
     @Volatile
     private var noClientsNotified = false
 
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    @Volatile
+    private var lastNetworkId: String? = null
+
+    @Volatile
+    private var networkRestartPending = false
+
     override fun onCreate() {
         super.onCreate()
         // Канал проблем общий с VPN-службой: создаём и здесь, иначе
         // уведомление о сбое прокси не покажется, если VPN не запускали.
         NotificationHelper.createChannel(this)
         createChannel()
+        registerNetworkMonitor()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -107,6 +178,20 @@ class TelegramProxyService : Service() {
         when (intent?.action) {
             ACTION_START -> startProxy()
             ACTION_STOP -> stopProxy()
+            ACTION_SWITCH -> {
+                if (TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
+                    // StopProxy + повторный старт блокируют поток на секунды,
+                    // поэтому уводим переключение с главного потока службы.
+                    thread(name = "tgws-switch", isDaemon = true) { switchChannel() }
+                } else {
+                    // Прокси не запущен: просто запоминаем выбор для следующего старта.
+                    val next = !TelegramPrefs.secure()
+                    TelegramPrefs.setSecure(next)
+                    TelegramRuntime.update { it.copy(channel = channelLabelFor(next)) }
+                    AppLog.i(TAG, "Канал для следующего запуска: ${channelLabelFor(next)}")
+                    stopSelfResult(startId)
+                }
+            }
             else -> {
                 if (TelegramRuntime.state.value.phase == TelegramPhase.STOPPED) {
                     stopSelfResult(startId)
@@ -116,7 +201,79 @@ class TelegramProxyService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startProxy() {
+    // -----------------------------------------------------------------------
+    // Смена сети
+    // -----------------------------------------------------------------------
+
+    /**
+     * Wi-Fi ↔ мобильные данные.
+     *
+     * Прокси держит долгоживущие TLS-соединения до Cloudflare и «залипший»
+     * выбор домена: после смены сети они мертвы, но выглядят живыми —
+     * соединение установлено, данных нет. В логах это ровно тот случай,
+     * на который жаловался владелец: на Wi-Fi работает, на мобильном нет
+     * (и наоборот). Поэтому на смену сети перезапускаем прокси целиком.
+     */
+    private fun registerNetworkMonitor() {
+        try {
+            val manager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            connectivityManager = manager
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val id = network.toString()
+                    val previous = lastNetworkId
+                    lastNetworkId = id
+                    if (previous == null || previous == id) return
+                    AppLog.w(TAG, "Смена сети: $previous -> $id")
+                    scheduleRestartForNetwork()
+                }
+            }
+            networkCallback = callback
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            manager.registerNetworkCallback(request, callback)
+        } catch (t: Throwable) {
+            AppLog.w(TAG, "NetworkCallback не зарегистрирован: ${t.message}")
+        }
+    }
+
+    private fun unregisterNetworkMonitor() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        try {
+            connectivityManager?.unregisterNetworkCallback(callback)
+        } catch (_: Throwable) {
+        }
+        connectivityManager = null
+    }
+
+    private fun scheduleRestartForNetwork() {
+        if (networkRestartPending) return
+        if (TelegramRuntime.state.value.phase != TelegramPhase.RUNNING) return
+        networkRestartPending = true
+        thread(name = "tgws-net", isDaemon = true) {
+            try {
+                // Сети нужно полсекунды-секунда, чтобы реально подняться.
+                Thread.sleep(1_500L)
+                if (TelegramRuntime.state.value.phase == TelegramPhase.RUNNING && !stopRequested) {
+                    AppLog.i(TAG, "Перезапуск прокси после смены сети")
+                    restartProxy("смена сети", asStall = false)
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } finally {
+                networkRestartPending = false
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Запуск
+    // -----------------------------------------------------------------------
+
+    private fun startProxy(fresh: Boolean = true) {
         if (working) return
         stopRequested = false
         val current = TelegramRuntime.state.value
@@ -125,13 +282,27 @@ class TelegramProxyService : Service() {
         ) {
             return
         }
+        if (fresh) {
+            // Пользователь нажал «Запустить»: берём настройки из prefs,
+            // а не «залипшие» переопределения прошлого запуска.
+            secureOverride = null
+            cfOverride = null
+            stallCount = 0
+        }
         val port = TelegramPrefs.port()
+        val secure = secureOverride ?: TelegramPrefs.secure()
+        val cf = cfOverride ?: TelegramPrefs.cfEnabled()
+        effectiveSecure = secure
+        effectiveCf = cf
+        val channel = channelLabelFor(secure, cf)
+
         TelegramRuntime.update {
             it.copy(
                 phase = TelegramPhase.STARTING,
                 port = port,
                 secret = null,
-                error = null
+                error = null,
+                channel = channel
             )
         }
         startForegroundCompat(getString(R.string.telegram_starting))
@@ -149,11 +320,15 @@ class TelegramProxyService : Service() {
                 }
 
                 val secret = TelegramPrefs.secret()
-                AppLog.i(TAG, "Запуск Telegram WS-прокси на 127.0.0.1:$port")
+                AppLog.i(TAG, "Запуск Telegram WS-прокси на 127.0.0.1:$port, канал: $channel")
+                // ВАЖНО: сначала транспорт, потом старт — библиотека читает
+                // DISABLE_SECURE при каждом соединении, но порядок так надёжнее
+                // и виден в логе до первого коннекта.
+                TelegramNative.setDisableSecure(!secure)
                 TelegramNative.configurePool(
                     poolSize = 8,
                     cacheDir = cacheDir.absolutePath,
-                    cfEnabled = cfOverride ?: TelegramPrefs.cfEnabled()
+                    cfEnabled = cf
                 )
                 val rc = TelegramNative.startProxy(
                     host = "127.0.0.1",
@@ -210,15 +385,16 @@ class TelegramProxyService : Service() {
                         phase = TelegramPhase.RUNNING,
                         port = port,
                         secret = fullSecret,
-                        error = null
+                        error = null,
+                        channel = channel
                     )
                 }
                 proxyStartedAt = System.currentTimeMillis()
                 noClientsNotified = false
-                AppLog.i(TAG, "Telegram WS-прокси работает: 127.0.0.1:$port")
+                AppLog.i(TAG, "Telegram WS-прокси работает: 127.0.0.1:$port, канал: $channel")
                 TelegramNative.stats()?.let { AppLog.i(TAG, "stats: $it") }
                 startStatsLogger()
-                updateNotification(getString(R.string.telegram_running, port))
+                updateNotification(getString(R.string.telegram_running_channel, port, channel))
             } catch (t: Throwable) {
                 AppLog.e(TAG, "Ошибка запуска Telegram WS-прокси: ${t.message}", t)
                 fail(t.message ?: t.javaClass.simpleName)
@@ -231,6 +407,9 @@ class TelegramProxyService : Service() {
     private fun stopProxy() {
         stopRequested = true
         statsRunning = false
+        secureOverride = null
+        cfOverride = null
+        stallCount = 0
         if (TelegramRuntime.state.value.phase == TelegramPhase.STOPPED) {
             stopForegroundCompat()
             stopSelf()
@@ -259,21 +438,32 @@ class TelegramProxyService : Service() {
         NotificationHelper.notifyProblem(this, getString(R.string.telegram_error, message))
     }
 
+    // -----------------------------------------------------------------------
+    // Статистика и watchdog
+    // -----------------------------------------------------------------------
+
     private fun startStatsLogger() {
         if (statsRunning) return
         statsRunning = true
+        val generation = ++statsGeneration
         thread(name = "tgws-stats", isDaemon = true) {
             var lastDown = -1L
             var lastUp = -1L
-            var lastProgressAt = System.currentTimeMillis()
             var lastTotal = -1L
-            while (statsRunning && TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
+            var lastSampleAt = System.currentTimeMillis()
+            var lastProgressAt = lastSampleAt
+            var goodBytes = 0L
+            var modeSaved = false
+
+            while (statsRunning && generation == statsGeneration &&
+                TelegramRuntime.state.value.phase == TelegramPhase.RUNNING
+            ) {
                 try {
                     Thread.sleep(15_000L)
                 } catch (_: InterruptedException) {
                     break
                 }
-                if (!statsRunning) break
+                if (!statsRunning || generation != statsGeneration) break
 
                 val stats = TelegramNative.stats() ?: continue
                 AppLog.i(TAG, "stats: $stats")
@@ -283,6 +473,27 @@ class TelegramProxyService : Service() {
                 val total = statValue(stats, "total")?.toLongOrNull() ?: -1L
                 val active = statValue(stats, "active")?.toIntOrNull() ?: 0
                 val now = System.currentTimeMillis()
+
+                /*
+                 * Большой пропуск между опросами — это не «канал умер»,
+                 * а Doze/экономия батареи: процесс заморозили, поток
+                 * проснулся позже. Иначе watchdog перезапускал бы прокси
+                 * каждый раз после разблокировки экрана.
+                 */
+                if (now - lastSampleAt > FREEZE_GAP_MS) {
+                    AppLog.w(
+                        TAG,
+                        "watchdog: процесс был заморожен ${(now - lastSampleAt) / 1000}с — " +
+                            "таймеры сброшены, перезапуск не нужен"
+                    )
+                    lastProgressAt = now
+                    lastDown = down
+                    lastUp = up
+                    lastTotal = total
+                    lastSampleAt = now
+                    continue
+                }
+                lastSampleAt = now
 
                 /*
                  * Прокси поднялся, но к нему никто не подключается дольше
@@ -299,83 +510,113 @@ class TelegramProxyService : Service() {
                     NotificationHelper.notifyProblem(this, hint)
                 }
 
-                val newConnections = total != lastTotal
-                val upGrew = up > lastUp
-                /*
-                 * Зависание — это когда клиент что-то отправил, а вниз
-                 * ничего не пришло. Тихий прокси с живым соединением
-                 * (Telegram просто молчит) зависанием не считаем, иначе
-                 * перезапускали бы его каждые 10 минут на ровном месте.
-                 *
-                 * Отдельный случай — распухший пул: active сильно больше
-                 * размера пула (8) при нулевом трафике, значит соединения
-                 * висят мёртвыми.
-                 */
-                val stuckPool = active >= STUCK_ACTIVE
-                when {
-                    down > lastDown -> {
-                        lastDown = down
-                        lastUp = up
-                        lastProgressAt = now
-                    }
-                    newConnections -> {
-                        // Новые соединения: даём им шанс, таймер с нуля.
-                        lastProgressAt = now
-                        lastUp = up
-                    }
-                    (upGrew || stuckPool) && active > 0 &&
-                        now - lastProgressAt >= STALL_MS -> {
-                        val stalledMs = now - lastProgressAt
-                        if (now - lastRestartAt < RESTART_COOLDOWN_MS) {
-                            AppLog.w(
-                                TAG,
-                                "watchdog: down стоит ${stalledMs / 1000}с, " +
-                                    "up=${statValue(stats, "up")}, active=$active — " +
-                                    "перезапуск был недавно, жду"
-                            )
-                        } else {
-                            lastRestartAt = now
-                            AppLog.w(
-                                TAG,
-                                "watchdog: down стоит ${stalledMs / 1000}с при " +
-                                    "up=${statValue(stats, "up")}, active=$active " +
-                                    "(total=$total) — перезапуск прокси"
-                            )
-                            statsRunning = false
-                            restartAfterStall()
-                            return@thread
+                val downGrew = down > lastDown
+                if (downGrew) {
+                    goodBytes += (down - lastDown).coerceAtLeast(0L)
+                    lastProgressAt = now
+                    /*
+                     * Канал реально отдал данные (порог GOOD_DOWNLOAD_BYTES):
+                     * сбрасываем счётчик застоев и один раз за запуск
+                     * запоминаем транспорт, который отработал, — следующий
+                     * запуск начнётся с него, а не с дефолтного.
+                     */
+                    if (goodBytes >= GOOD_DOWNLOAD_BYTES) {
+                        goodBytes = 0
+                        stallCount = 0
+                        if (!modeSaved) {
+                            modeSaved = true
+                            if (TelegramPrefs.secure() != effectiveSecure) {
+                                TelegramPrefs.setSecure(effectiveSecure)
+                                AppLog.i(
+                                    TAG,
+                                    "канал ${channelLabelFor(effectiveSecure)} отдал данные — " +
+                                        "запоминаю как рабочий"
+                                )
+                            }
                         }
                     }
                 }
-                lastTotal = total
+
+                val attempts = total != lastTotal || up > lastUp
+                val stuckPool = active >= STUCK_ACTIVE
+                /*
+                 * Зависание — это когда клиент пробует (новые соединения
+                 * или отправка вверх), а вниз ничего не приходит. Тихий
+                 * прокси с живым соединением зависанием не считаем.
+                 */
+                if (!downGrew && active > 0 && (attempts || stuckPool) &&
+                    now - lastProgressAt >= STALL_MS
+                ) {
+                    val stalledSec = (now - lastProgressAt) / 1000
+                    if (now - lastRestartAt < RESTART_COOLDOWN_MS) {
+                        AppLog.w(
+                            TAG,
+                            "watchdog: данных нет ${stalledSec}с (active=$active, " +
+                                "total=$total), перезапуск был недавно — жду"
+                        )
+                    } else {
+                        AppLog.w(
+                            TAG,
+                            "watchdog: данных нет ${stalledSec}с при active=$active, " +
+                                "up=${statValue(stats, "up")}, total=$total " +
+                                "(канал ${channelLabelFor(effectiveSecure, effectiveCf)}) — " +
+                                "перезапуск"
+                        )
+                        statsRunning = false
+                        restartProxy(
+                            "нет данных ${stalledSec}с при active=$active, total=$total"
+                        )
+                        return@thread
+                    }
+                }
+
+                if (downGrew) lastDown = down else if (down < lastDown) lastDown = down
                 if (up > lastUp) lastUp = up
+                lastTotal = total
             }
         }
     }
 
     /**
-     * Перезапускает нативный прокси, не убивая службу: сначала StopProxy,
-     * потом обычный путь запуска (он сам поднимет новый stats-логгер).
+     * Перезапускает нативный прокси, не убивая службу.
+     *
+     * `asStall = true` — это реакция на застой: считаем попытки и со второй
+     * подряд меняем транспорт Cloudflare (TLS 443 ↔ HTTP 80). `false` —
+     * технический перезапуск (смена сети, ручное переключение канала),
+     * транспорт остаётся тем, что выбран.
      */
-    private fun restartAfterStall() {
+    private fun restartProxy(reason: String, asStall: Boolean = true) {
         val now = System.currentTimeMillis()
-        if (now - lastStallAt > STALL_RESET_MS) stallCount = 0
-        stallCount++
-        lastStallAt = now
+        if (asStall) {
+            if (now - lastStallAt > STALL_RESET_MS) stallCount = 0
+            stallCount++
+            lastStallAt = now
 
-        /*
-         * Второй застой подряд: один и тот же канал Cloudflare, скорее всего,
-         * перестал пропускать трафик (типично для мобильных операторов).
-         * На этот запуск службы пробуем противоположную настройку CF;
-         * после ручного перезапуска вернётся выбор пользователя.
-         */
-        if (stallCount >= 2 && cfOverride == null) {
-            val current = TelegramPrefs.cfEnabled()
-            cfOverride = !current
-            val text = getString(R.string.telegram_cf_switched)
-            AppLog.w(TAG, "watchdog: второй застой подряд — Cloudflare $current -> ${!current}")
-            NotificationHelper.notifyProblem(this, text)
+            /*
+             * Второй застой подряд: транспорт не пропускает трафик.
+             * Пробуем противоположный — у операторов по-разному: кто-то
+             * режет TLS по SNI, кто-то HTTP на 80.
+             */
+            if (stallCount >= 2 && secureOverride == null) {
+                val next = !effectiveSecure
+                secureOverride = next
+                TelegramPrefs.setSecure(next)
+                AppLog.w(
+                    TAG,
+                    "watchdog: $reason — переключаю транспорт на ${channelLabelFor(next)}"
+                )
+                NotificationHelper.notifyProblem(
+                    this,
+                    getString(R.string.telegram_channel_switched, channelLabelFor(next))
+                )
+            } else if (stallCount >= 4 && cfOverride == null) {
+                val next = !effectiveCf
+                cfOverride = next
+                AppLog.w(TAG, "watchdog: $reason — Cloudflare $effectiveCf -> $next")
+                NotificationHelper.notifyProblem(this, getString(R.string.telegram_cf_switched))
+            }
         }
+        lastRestartAt = now
 
         try {
             TelegramNative.stats()?.let { AppLog.i(TAG, "stats before restart: $it") }
@@ -385,11 +626,27 @@ class TelegramProxyService : Service() {
         }
         TelegramRuntime.update { it.copy(phase = TelegramPhase.STOPPED) }
         try {
-            Thread.sleep(1_000L)
+            Thread.sleep(700L)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
-        startProxy()
+        startProxy(fresh = false)
+    }
+
+    /** Ручное переключение транспорта Cloudflare из UI. */
+    private fun switchChannel() {
+        val next = !effectiveSecure
+        secureOverride = next
+        TelegramPrefs.setSecure(next)
+        AppLog.i(TAG, "Ручное переключение канала на ${channelLabelFor(next)}")
+        statsRunning = false
+        restartProxy("ручное переключение", asStall = false)
+    }
+
+    private fun channelLabelFor(secure: Boolean, cf: Boolean = effectiveCf): String = when {
+        !cf -> getString(R.string.telegram_channel_direct)
+        secure -> getString(R.string.telegram_channel_tls)
+        else -> getString(R.string.telegram_channel_http)
     }
 
     /** Проверяет, что на порту действительно кто-то слушает. */
@@ -423,6 +680,10 @@ class TelegramProxyService : Service() {
         }
         return (number * multiplier).toLong()
     }
+
+    // -----------------------------------------------------------------------
+    // Уведомление и жизненный цикл
+    // -----------------------------------------------------------------------
 
     private fun updateNotification(text: String) {
         try {
@@ -501,6 +762,7 @@ class TelegramProxyService : Service() {
 
     override fun onDestroy() {
         statsRunning = false
+        unregisterNetworkMonitor()
         if (TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
             try {
                 TelegramNative.stopProxy()

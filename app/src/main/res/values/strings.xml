@@ -148,6 +148,14 @@
     <string name="telegram_error">Ошибка: %1$s</string>
     <string name="telegram_error_native">libtgwsproxy недоступна для этой ABI</string>
     <string name="telegram_channel_name">Telegram WS-прокси</string>
+    <string name="telegram_channel">Канал: %1$s</string>
+    <string name="telegram_channel_tls">Cloudflare TLS 443</string>
+    <string name="telegram_channel_http">Cloudflare HTTP 80</string>
+    <string name="telegram_channel_direct">напрямую через WS</string>
+    <string name="telegram_channel_switch">Сменить канал</string>
+    <string name="telegram_channel_switched">Канал переключён на %1$s, прокси перезапущен</string>
+    <string name="telegram_channel_hint">Если на мобильном интернете Telegram не грузит, нажмите «Сменить канал»: у операторов работают разные транспорты (TLS 443 или HTTP 80).</string>
+    <string name="telegram_running_channel">127.0.0.1:%1$d · %2$s</string>
     <string name="telegram_channel_description">Локальный MTProto-прокси Telegram</string>
     <string name="telegram_hint">Нажмите «Применить в Telegram» и подтвердите прокси. Если Telegram не открылся — скопируйте ссылку и добавьте вручную: Настройки → Данные и память → Прокси.</string>
 

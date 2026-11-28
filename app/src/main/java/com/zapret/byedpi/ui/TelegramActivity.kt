@@ -12,6 +12,7 @@ import com.zapret.byedpi.databinding.ActivityTelegramBinding
 import com.zapret.byedpi.telegram.TelegramPhase
 import com.zapret.byedpi.telegram.TelegramPrefs
 import com.zapret.byedpi.telegram.TelegramProxyController
+import com.zapret.byedpi.telegram.TelegramProxyService
 import com.zapret.byedpi.telegram.TelegramRuntime
 import com.zapret.byedpi.telegram.TelegramState
 import kotlinx.coroutines.flow.collect
@@ -40,6 +41,10 @@ class TelegramActivity : AppCompatActivity() {
             if (!TelegramProxyController.copyLink(this)) {
                 Toast.makeText(this, R.string.telegram_not_running, Toast.LENGTH_SHORT).show()
             }
+        }
+        binding.btnTelegramChannel.setOnClickListener {
+            TelegramProxyService.switchChannel(this)
+            Toast.makeText(this, R.string.telegram_channel_switch, Toast.LENGTH_SHORT).show()
         }
 
         binding.swTelegramCf.isChecked = TelegramPrefs.cfEnabled()
@@ -94,6 +99,14 @@ class TelegramActivity : AppCompatActivity() {
             binding.tvTelegramSecret.text = getString(R.string.telegram_secret, secret)
         }
 
+        val channel = state.channel
+        if (channel.isNullOrBlank()) {
+            binding.tvTelegramChannel.visibility = android.view.View.GONE
+        } else {
+            binding.tvTelegramChannel.visibility = android.view.View.VISIBLE
+            binding.tvTelegramChannel.text = getString(R.string.telegram_channel, channel)
+        }
+
         val active = state.phase == TelegramPhase.RUNNING ||
             state.phase == TelegramPhase.STARTING
         binding.btnTelegramStartStop.text = if (active) {
@@ -106,5 +119,7 @@ class TelegramActivity : AppCompatActivity() {
         binding.btnTelegramCopy.isEnabled = ready
         binding.btnTelegramApply.alpha = if (ready) 1f else 0.5f
         binding.btnTelegramCopy.alpha = if (ready) 1f else 0.5f
+        binding.btnTelegramChannel.isEnabled = ready
+        binding.btnTelegramChannel.alpha = if (ready) 1f else 0.5f
     }
 }
