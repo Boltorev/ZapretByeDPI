@@ -22,6 +22,9 @@ class TelegramActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityTelegramBinding
 
+    /** Пока true — переключатель канала обновляется кодом, а не пользователем. */
+    private var renderingChannel = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityTelegramBinding.inflate(layoutInflater)
@@ -42,9 +45,13 @@ class TelegramActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.telegram_not_running, Toast.LENGTH_SHORT).show()
             }
         }
-        binding.btnTelegramChannel.setOnClickListener {
-            TelegramProxyService.switchChannel(this)
-            Toast.makeText(this, R.string.telegram_channel_switch, Toast.LENGTH_SHORT).show()
+
+        // Ручной выбор канала: запоминается для текущей сети (Wi-Fi / мобильная).
+        binding.tgChannelGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked || renderingChannel) return@addOnButtonCheckedListener
+            val secure = checkedId == R.id.btnChannelTls
+            TelegramProxyService.selectChannel(this, secure)
+            Toast.makeText(this, R.string.telegram_channel_applied, Toast.LENGTH_SHORT).show()
         }
 
         binding.swTelegramCf.isChecked = TelegramPrefs.cfEnabled()
@@ -99,13 +106,7 @@ class TelegramActivity : AppCompatActivity() {
             binding.tvTelegramSecret.text = getString(R.string.telegram_secret, secret)
         }
 
-        val channel = state.channel
-        if (channel.isNullOrBlank()) {
-            binding.tvTelegramChannel.visibility = android.view.View.GONE
-        } else {
-            binding.tvTelegramChannel.visibility = android.view.View.VISIBLE
-            binding.tvTelegramChannel.text = getString(R.string.telegram_channel, channel)
-        }
+        renderChannel(state)
 
         val active = state.phase == TelegramPhase.RUNNING ||
             state.phase == TelegramPhase.STARTING
@@ -119,7 +120,33 @@ class TelegramActivity : AppCompatActivity() {
         binding.btnTelegramCopy.isEnabled = ready
         binding.btnTelegramApply.alpha = if (ready) 1f else 0.5f
         binding.btnTelegramCopy.alpha = if (ready) 1f else 0.5f
-        binding.btnTelegramChannel.isEnabled = ready
-        binding.btnTelegramChannel.alpha = if (ready) 1f else 0.5f
+    }
+
+    /**
+     * Карточка «Канал»: текущий транспорт крупным текстом и две кнопки
+     * для ручного выбора (TLS 443 / HTTP 80).
+     */
+    private fun renderChannel(state: TelegramState) {
+        val channel = state.channel
+        binding.tvTelegramChannel.text = when {
+            channel == null -> getString(R.string.telegram_channel_unknown)
+            state.probing -> getString(R.string.telegram_channel_probing, channel)
+            else -> getString(R.string.telegram_channel_current, channel)
+        }
+
+        val secure = state.secure
+        if (secure != null) {
+            renderingChannel = true
+            try {
+                binding.tgChannelGroup.check(
+                    if (secure) R.id.btnChannelTls else R.id.btnChannelHttp
+                )
+            } finally {
+                renderingChannel = false
+            }
+        }
+        // Когда прокси остановлен, выбор не сбрасываем: selectionRequired
+        // не даёт снять последнюю кнопку, и это же подсказывает, что будет
+        // включено при следующем запуске.
     }
 }

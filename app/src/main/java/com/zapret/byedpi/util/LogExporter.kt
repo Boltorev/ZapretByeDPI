@@ -116,7 +116,13 @@ object LogExporter {
             val telegram = TelegramRuntime.state.value
             appendLine("telegram: ${telegram.phase} port=${telegram.port} error=${telegram.error}")
             appendLine("telegram channel: ${telegram.channel}")
-            appendLine("telegram secure(443): ${TelegramPrefs.secure()} cf: ${TelegramPrefs.cfEnabled()}")
+            appendLine("telegram probing: ${telegram.probing}")
+            appendLine(
+                "telegram channel prefs: wifi=${secureLabel(TelegramPrefs.NET_WIFI)} " +
+                    "cell=${secureLabel(TelegramPrefs.NET_CELL)} " +
+                    "other=${secureLabel(TelegramPrefs.NET_OTHER)} " +
+                    "cf=${TelegramPrefs.cfEnabled()}"
+            )
             appendLine()
 
             appendLine("=== hev / native ===")
@@ -176,8 +182,13 @@ object LogExporter {
         }
     }
 
-    /** Best-effort чтение нативного лога: `logcat -d -s TgWsProxy`. */
-    private fun readNativeLog(maxLines: Int = 600): String {
+    private fun secureLabel(kind: String): String = when (TelegramPrefs.secureFor(kind)) {
+        true -> "443"
+        false -> "80"
+        null -> "auto"
+    }
+
+    /** Best-effort чтение нативного лога: `logcat -d -s TgWsProxy`. */    private fun readNativeLog(maxLines: Int = 600): String {
         return try {
             val process = ProcessBuilder(
                 "logcat", "-d", "-v", "time", "-s", "TgWsProxy"

@@ -23,7 +23,11 @@ data class TelegramState(
      * или `напрямую`. Видно в UI и в отчёте: по этому полю сразу понятно,
      * какой канал проверял тестировщик.
      */
-    val channel: String? = null
+    val channel: String? = null,
+    /** true — TLS 443, false — HTTP 80, null — прокси остановлен. */
+    val secure: Boolean? = null,
+    /** Идёт ли сейчас автоматический подбор канала под эту сеть. */
+    val probing: Boolean = false
 )
 
 object TelegramRuntime {

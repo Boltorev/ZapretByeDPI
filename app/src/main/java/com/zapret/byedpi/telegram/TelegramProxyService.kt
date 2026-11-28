@@ -29,7 +29,10 @@ class TelegramProxyService : Service() {
     companion object {
         const val ACTION_START = "com.zapret.byedpi.telegram.START"
         const val ACTION_STOP = "com.zapret.byedpi.telegram.STOP"
-        const val ACTION_SWITCH = "com.zapret.byedpi.telegram.SWITCH"
+
+        /** Ручной выбор канала: extra [EXTRA_SECURE] = true (TLS 443) / false (HTTP 80). */
+        const val ACTION_SET_CHANNEL = "com.zapret.byedpi.telegram.SET_CHANNEL"
+        const val EXTRA_SECURE = "secure"
 
         private const val TAG = "TelegramProxy"
         private const val CHANNEL_ID = "tg_ws_proxy"
@@ -67,9 +70,32 @@ class TelegramProxyService : Service() {
 
         /**
          * Сколько байт вниз должен отдать канал, чтобы считать его рабочим
-         * и запомнить выбор транспорта для следующего запуска.
+         * и запомнить выбор транспорта для следующей сети.
          */
         private const val GOOD_DOWNLOAD_BYTES = 400_000L
+
+        // --- Автоподбор канала при старте -----------------------------------
+        //
+        // Канал зависит от сети: на мобильном интернете обычно проходит
+        // TLS 443, на домашнем Wi-Fi — HTTP 80 (проверено на логах 0.6.6:
+        // на 443 `ws tls fail … timeout`, на 80 `CF ok`). Поэтому при первом
+        // запуске в незнакомой сети оба канала проверяются автоматически,
+        // а не через две минуты ожидания watchdog.
+
+        /** Интервал опроса в режиме подбора канала. */
+        private const val PROBE_SAMPLE_MS = 6_000L
+
+        /** Через сколько секунд без единого CF-соединения канал считается мёртвым. */
+        private const val PROBE_NO_CF_MS = 12_000L
+
+        /** Через сколько секунд без данных (при живом CF) канал считается слабым. */
+        private const val PROBE_NO_DATA_MS = 30_000L
+
+        /** Сколько данных достаточно, чтобы признать канал рабочим в подборе. */
+        private const val PROBE_GOOD_BYTES = 8 * 1024L
+
+        /** Сколько раз автоподбор может переключить канал за один подбор. */
+        private const val PROBE_MAX_SWITCHES = 1
 
         @Volatile
         private var working = false
@@ -97,19 +123,20 @@ class TelegramProxyService : Service() {
         }
 
         /**
-         * Переключить транспорт Cloudflare (TLS 443 ↔ HTTP 80).
+         * Ручной выбор канала (TLS 443 / HTTP 80).
          *
-         * На разных операторах «работает» разный канал: у кого-то режут
-         * TLS по SNI, у кого-то — HTTP на 80. Кнопка даёт тестировщику
-         * проверить второй канал за пару секунд, не дожидаясь watchdog.
+         * Выбор запоминается для текущей сети и применяется сразу, если прокси
+         * запущен. Кнопки в UI вызывают именно это — автоподбор после ручного
+         * выбора не вмешивается.
          */
-        fun switchChannel(context: Context) {
+        fun selectChannel(context: Context, secure: Boolean) {
             val intent = Intent(context, TelegramProxyService::class.java)
-                .setAction(ACTION_SWITCH)
+                .setAction(ACTION_SET_CHANNEL)
+                .putExtra(EXTRA_SECURE, secure)
             try {
                 context.startService(intent)
             } catch (t: Throwable) {
-                AppLog.w(TAG, "Переключение канала: ${t.message}")
+                AppLog.w(TAG, "Выбор канала: ${t.message}")
             }
         }
     }
@@ -136,7 +163,7 @@ class TelegramProxyService : Service() {
     @Volatile
     private var cfOverride: Boolean? = null
 
-    /** Переопределение транспорта (TLS/HTTP) только на текущий запуск службы. */
+    /** Ручной/подобранный транспорт только на текущий запуск службы. */
     @Volatile
     private var secureOverride: Boolean? = null
 
@@ -146,6 +173,38 @@ class TelegramProxyService : Service() {
 
     @Volatile
     private var effectiveCf = true
+
+    /** Вид текущей сети: Wi-Fi / мобильная / прочее — ключ для запоминания канала. */
+    @Volatile
+    private var networkKind: String = TelegramPrefs.NET_OTHER
+
+    /** Автоподбор канала: закончен ли он для текущей сети. */
+    @Volatile
+    private var probeDone = true
+
+    /**
+     * Подбор канала для этой сети уже сделан. Держится между перезапусками
+     * прокси (watchdog, смена канала), сбрасывается только при новом запуске
+     * пользователем и при смене сети — иначе каждая перезагрузка заново
+     * дёргала бы оба канала.
+     */
+    @Volatile
+    private var probeFinished = false
+
+    /** Сколько переключений сделал автоподбор (ограничено PROBE_MAX_SWITCHES). */
+    @Volatile
+    private var probeSwitches = 0
+
+    /** Какие транспорты уже проверены в этом подборе. */
+    private val probeTried = HashSet<Boolean>()
+
+    /**
+     * Канал выбран вручную. Пока флаг стоит, автоподбор его не перетирает:
+     * человек мог выбрать канал специально (например, чтобы проверить).
+     * Сбрасывается при новом запуске и при смене сети.
+     */
+    @Volatile
+    private var manualChannel = false
 
     /** Момент, когда прокси поднялся: нужен для подсказки «Telegram не подключается». */
     @Volatile
@@ -178,18 +237,18 @@ class TelegramProxyService : Service() {
         when (intent?.action) {
             ACTION_START -> startProxy()
             ACTION_STOP -> stopProxy()
-            ACTION_SWITCH -> {
-                if (TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
-                    // StopProxy + повторный старт блокируют поток на секунды,
-                    // поэтому уводим переключение с главного потока службы.
-                    thread(name = "tgws-switch", isDaemon = true) { switchChannel() }
-                } else {
-                    // Прокси не запущен: просто запоминаем выбор для следующего старта.
-                    val next = !TelegramPrefs.secure()
-                    TelegramPrefs.setSecure(next)
-                    TelegramRuntime.update { it.copy(channel = channelLabelFor(next)) }
-                    AppLog.i(TAG, "Канал для следующего запуска: ${channelLabelFor(next)}")
-                    stopSelfResult(startId)
+            ACTION_SET_CHANNEL -> {
+                val secure = intent.getBooleanExtra(EXTRA_SECURE, true)
+                // Переключение нативной библиотеки блокирует поток на секунды,
+                // поэтому уводим его с главного потока службы.
+                thread(name = "tgws-channel", isDaemon = true) {
+                    selectChannelBlocking(secure)
+                    val phase = TelegramRuntime.state.value.phase
+                    if (phase != TelegramPhase.RUNNING && phase != TelegramPhase.STARTING) {
+                        // Прокси не был запущен: служба только запомнила выбор.
+                        stopForegroundCompat()
+                        stopSelf(startId)
+                    }
                 }
             }
             else -> {
@@ -202,17 +261,44 @@ class TelegramProxyService : Service() {
     }
 
     // -----------------------------------------------------------------------
-    // Смена сети
+    // Сети и каналы
     // -----------------------------------------------------------------------
+
+    /**
+     * Какая сейчас сеть: Wi-Fi, мобильная или прочее.
+     *
+     * Нужна, чтобы запоминать рабочий канал отдельно для Wi-Fi и для
+     * мобильного интернета: у них проходят разные транспорты. VPN-сети
+     * пропускаем — интересует физический канал.
+     */
+    private fun detectNetworkKind(): String {
+        return try {
+            val manager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            var cellular = false
+            for (network in manager.allNetworks) {
+                val caps = manager.getNetworkCapabilities(network) ?: continue
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).not()) continue
+                when {
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> return TelegramPrefs.NET_WIFI
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> cellular = true
+                }
+            }
+            if (cellular) TelegramPrefs.NET_CELL else TelegramPrefs.NET_OTHER
+        } catch (t: Throwable) {
+            AppLog.w(TAG, "Не удалось определить тип сети: ${t.message}")
+            TelegramPrefs.NET_OTHER
+        }
+    }
 
     /**
      * Wi-Fi ↔ мобильные данные.
      *
-     * Прокси держит долгоживущие TLS-соединения до Cloudflare и «залипший»
-     * выбор домена: после смены сети они мертвы, но выглядят живыми —
-     * соединение установлено, данных нет. В логах это ровно тот случай,
-     * на который жаловался владелец: на Wi-Fi работает, на мобильном нет
-     * (и наоборот). Поэтому на смену сети перезапускаем прокси целиком.
+     * Прокси держит долгоживущие соединения до Cloudflare и «залипший» выбор
+     * домена: после смены сети они мертвы, но выглядят живыми — соединение
+     * установлено, данных нет. В логе 0.6.6 ровно это: на Wi-Fi `ws tls fail
+     * … timeout`, а на мобильном тот же канал работает. Поэтому на смену сети
+     * перезапускаем прокси и заново выбираем канал под новую сеть.
      */
     private fun registerNetworkMonitor() {
         try {
@@ -258,13 +344,55 @@ class TelegramProxyService : Service() {
                 // Сети нужно полсекунды-секунда, чтобы реально подняться.
                 Thread.sleep(1_500L)
                 if (TelegramRuntime.state.value.phase == TelegramPhase.RUNNING && !stopRequested) {
-                    AppLog.i(TAG, "Перезапуск прокси после смены сети")
+                    // Сеть другая — канал для неё может быть другим,
+                    // и подбирать его нужно заново.
+                    secureOverride = null
+                    networkKind = detectNetworkKind()
+                    probeSwitches = 0
+                    probeTried.clear()
+                    probeFinished = false
+                    manualChannel = false
+                    stallCount = 0
+                    AppLog.i(
+                        TAG,
+                        "Перезапуск прокси после смены сети (${networkKindForLog()})"
+                    )
                     restartProxy("смена сети", asStall = false)
                 }
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             } finally {
                 networkRestartPending = false
+            }
+        }
+    }
+
+    /** Ручной выбор канала из UI: запоминаем для этой сети и сразу применяем. */
+    private fun selectChannelBlocking(secure: Boolean) {
+        networkKind = detectNetworkKind()
+        TelegramPrefs.setSecureFor(networkKind, secure)
+        secureOverride = secure
+        // Ручной выбор уважаем: автоподбор не перетирает его сразу,
+        // но watchdog при долгом застое всё равно попробует второй канал.
+        probeDone = true
+        probeFinished = true
+        probeSwitches = 0
+        probeTried.clear()
+        manualChannel = true
+        AppLog.i(
+            TAG,
+            "Выбран канал ${channelLabelFor(secure)} для ${networkKindForLog()}"
+        )
+        if (TelegramRuntime.state.value.phase == TelegramPhase.RUNNING) {
+            statsRunning = false
+            restartProxy("ручной выбор канала", asStall = false)
+        } else {
+            TelegramRuntime.update {
+                it.copy(
+                    channel = channelLabelFor(secure),
+                    secure = secure,
+                    probing = false
+                )
             }
         }
     }
@@ -288,12 +416,26 @@ class TelegramProxyService : Service() {
             secureOverride = null
             cfOverride = null
             stallCount = 0
+            probeSwitches = 0
+            probeTried.clear()
+            probeFinished = false
+            manualChannel = false
+            networkKind = detectNetworkKind()
         }
         val port = TelegramPrefs.port()
-        val secure = secureOverride ?: TelegramPrefs.secure()
+        val saved = TelegramPrefs.secureFor(networkKind)
+        val secure = secureOverride ?: saved ?: TelegramPrefs.secureFallback()
         val cf = cfOverride ?: TelegramPrefs.cfEnabled()
         effectiveSecure = secure
         effectiveCf = cf
+        /*
+         * Проверка канала запускается на КАЖДОМ новом запуске, а не только
+         * там, где канал для сети неизвестен. Иначе «запомненный» канал,
+         * который у оператора перестал проходить, будет молча ждать две
+         * минуты до watchdog. Если канал уже проверен в этом сеансе
+         * (перезапуск watchdog'ом или переключение) — не проверяем заново.
+         */
+        probeDone = probeFinished
         val channel = channelLabelFor(secure, cf)
 
         TelegramRuntime.update {
@@ -302,7 +444,9 @@ class TelegramProxyService : Service() {
                 port = port,
                 secret = null,
                 error = null,
-                channel = channel
+                channel = channel,
+                secure = secure,
+                probing = !probeDone
             )
         }
         startForegroundCompat(getString(R.string.telegram_starting))
@@ -320,7 +464,11 @@ class TelegramProxyService : Service() {
                 }
 
                 val secret = TelegramPrefs.secret()
-                AppLog.i(TAG, "Запуск Telegram WS-прокси на 127.0.0.1:$port, канал: $channel")
+                AppLog.i(
+                    TAG,
+                    "Запуск Telegram WS-прокси на 127.0.0.1:$port, канал: $channel" +
+                        if (probeDone) "" else " (подбор канала)"
+                )
                 // ВАЖНО: сначала транспорт, потом старт — библиотека читает
                 // DISABLE_SECURE при каждом соединении, но порядок так надёжнее
                 // и виден в логе до первого коннекта.
@@ -386,7 +534,9 @@ class TelegramProxyService : Service() {
                         port = port,
                         secret = fullSecret,
                         error = null,
-                        channel = channel
+                        channel = channel,
+                        secure = secure,
+                        probing = !probeDone
                     )
                 }
                 proxyStartedAt = System.currentTimeMillis()
@@ -410,6 +560,10 @@ class TelegramProxyService : Service() {
         secureOverride = null
         cfOverride = null
         stallCount = 0
+        probeSwitches = 0
+        probeTried.clear()
+        probeFinished = false
+        probeDone = true
         if (TelegramRuntime.state.value.phase == TelegramPhase.STOPPED) {
             stopForegroundCompat()
             stopSelf()
@@ -431,7 +585,7 @@ class TelegramProxyService : Service() {
 
     private fun fail(message: String) {
         TelegramRuntime.update {
-            it.copy(phase = TelegramPhase.ERROR, error = message)
+            it.copy(phase = TelegramPhase.ERROR, error = message, probing = false)
         }
         AppLog.e(TAG, "Telegram WS-прокси: $message")
         updateNotification(getString(R.string.telegram_error, message))
@@ -439,7 +593,7 @@ class TelegramProxyService : Service() {
     }
 
     // -----------------------------------------------------------------------
-    // Статистика и watchdog
+    // Статистика, автоподбор канала и watchdog
     // -----------------------------------------------------------------------
 
     private fun startStatsLogger() {
@@ -451,6 +605,7 @@ class TelegramProxyService : Service() {
             var lastUp = -1L
             var lastTotal = -1L
             var lastSampleAt = System.currentTimeMillis()
+            val startedAt = lastSampleAt
             var lastProgressAt = lastSampleAt
             var goodBytes = 0L
             var modeSaved = false
@@ -459,7 +614,9 @@ class TelegramProxyService : Service() {
                 TelegramRuntime.state.value.phase == TelegramPhase.RUNNING
             ) {
                 try {
-                    Thread.sleep(15_000L)
+                    // Пока идёт подбор канала, опрашиваем чаще: иначе мёртвый
+                    // транспорт будет висеть до минуты.
+                    Thread.sleep(if (probeDone) 15_000L else PROBE_SAMPLE_MS)
                 } catch (_: InterruptedException) {
                     break
                 }
@@ -472,7 +629,9 @@ class TelegramProxyService : Service() {
                 val up = parseBytes(statValue(stats, "up")) ?: 0L
                 val total = statValue(stats, "total")?.toLongOrNull() ?: -1L
                 val active = statValue(stats, "active")?.toIntOrNull() ?: 0
+                val cf = statValue(stats, "cf")?.toLongOrNull() ?: 0L
                 val now = System.currentTimeMillis()
+                val elapsed = now - startedAt
 
                 /*
                  * Большой пропуск между опросами — это не «канал умер»,
@@ -525,14 +684,123 @@ class TelegramProxyService : Service() {
                         stallCount = 0
                         if (!modeSaved) {
                             modeSaved = true
-                            if (TelegramPrefs.secure() != effectiveSecure) {
-                                TelegramPrefs.setSecure(effectiveSecure)
-                                AppLog.i(
+                            rememberChannel(effectiveSecure, "канал отдал данные")
+                        }
+                    }
+                }
+
+                // --- Автоподбор канала под новую сеть ---------------------
+                if (!probeDone) {
+                    val clientsWork = total >= 2 || active >= 1
+                    val decision = when {
+                        // Данные пошли — канал найден.
+                        down >= PROBE_GOOD_BYTES -> "good"
+                        // Клиенты есть, а ни одного CF-соединения не открылось.
+                        clientsWork && cf <= 0L && elapsed >= PROBE_NO_CF_MS -> "dead"
+                        // CF-соединения есть, но данные не идут.
+                        clientsWork && cf > 0L && down < 1024L &&
+                            elapsed >= PROBE_NO_DATA_MS -> "dead"
+                        // Что-то уже капает — транспорт живой, дальше решает watchdog.
+                        cf > 0L && down > 0L -> "live"
+                        // Клиентов нет вовсе — проверять нечего, ждём Telegram.
+                        total <= 0L && elapsed >= NO_CLIENTS_MS -> "idle"
+                        else -> ""
+                    }
+                    when (decision) {
+                        "idle" -> {
+                            probeDone = true
+                            probeFinished = true
+                            TelegramRuntime.update { it.copy(probing = false) }
+                            AppLog.i(
+                                TAG,
+                                "автоподбор: за ${elapsed / 1000}с ни одного клиента — " +
+                                    "проверку канала откладываю"
+                            )
+                        }
+                        "good" -> {
+                            probeDone = true
+                            probeFinished = true
+                            secureOverride = null
+                            rememberChannel(effectiveSecure, "автоподбор: канал рабочий")
+                            TelegramRuntime.update { it.copy(probing = false) }
+                            AppLog.i(
+                                TAG,
+                                "автоподбор: канал ${channelLabelFor(effectiveSecure)} рабочий " +
+                                    "(cf=$cf, down=${humanBytes(down)})"
+                            )
+                        }
+
+                        "live" -> {
+                            probeDone = true
+                            probeFinished = true
+                            secureOverride = null
+                            rememberChannel(effectiveSecure, "автоподбор: CF отвечает")
+                            TelegramRuntime.update { it.copy(probing = false) }
+                            AppLog.i(
+                                TAG,
+                                "автоподбор: канал ${channelLabelFor(effectiveSecure)} отвечает " +
+                                    "(cf=$cf, down=${humanBytes(down)}), подбор закончен"
+                            )
+                        }
+
+                        "dead" -> {
+                            val alternative = !effectiveSecure
+                            if (manualChannel) {
+                                // Канал выбран человеком — не переключаем сами.
+                                probeDone = true
+                                probeFinished = true
+                                TelegramRuntime.update { it.copy(probing = false) }
+                                AppLog.w(
                                     TAG,
-                                    "канал ${channelLabelFor(effectiveSecure)} отдал данные — " +
-                                        "запоминаю как рабочий"
+                                    "автоподбор: выбранный вручную канал " +
+                                        "${channelLabelFor(effectiveSecure)} пока не отдаёт " +
+                                        "данные (cf=$cf, down=${humanBytes(down)}) — " +
+                                        "оставляю как выбрано"
                                 )
+                            } else if (!probeTried.contains(effectiveSecure) &&
+                                probeSwitches < PROBE_MAX_SWITCHES
+                            ) {
+                                probeTried.add(effectiveSecure)
+                                probeSwitches++
+                                AppLog.w(
+                                    TAG,
+                                    "автоподбор: канал ${channelLabelFor(effectiveSecure)} " +
+                                        "не работает (cf=$cf, down=${humanBytes(down)}, " +
+                                        "total=$total) — пробую ${channelLabelFor(alternative)}"
+                                )
+                                statsRunning = false
+                                applyChannel(alternative, "автоподбор канала")
+                                return@thread
                             }
+                            /*
+                             * Оба транспорта не дали данных. Возвращаемся на
+                             * канал, сохранённый для этой сети (он когда-то
+                             * работал), и больше не дёргаем: дальше решает
+                             * обычный watchdog.
+                             */
+                            val fallback = TelegramPrefs.secureFor(networkKind)
+                                ?: TelegramPrefs.secureFallback()
+                            probeDone = true
+                            probeFinished = true
+                            TelegramRuntime.update { it.copy(probing = false) }
+                            if (fallback != effectiveSecure) {
+                                AppLog.w(
+                                    TAG,
+                                    "автоподбор: оба канала не дали данных " +
+                                        "(cf=$cf, down=${humanBytes(down)}) — " +
+                                        "возвращаюсь на сохранённый " +
+                                        channelLabelFor(fallback)
+                                )
+                                statsRunning = false
+                                applyChannel(fallback, "автоподбор: возврат на сохранённый канал")
+                                return@thread
+                            }
+                            AppLog.w(
+                                TAG,
+                                "автоподбор: оба канала не дали данных " +
+                                    "(cf=$cf, down=${humanBytes(down)}) — оставляю " +
+                                    channelLabelFor(effectiveSecure)
+                            )
                         }
                     }
                 }
@@ -577,12 +845,34 @@ class TelegramProxyService : Service() {
         }
     }
 
+    /** Запоминает рабочий канал для текущего типа сети (Wi-Fi / мобильная). */
+    private fun rememberChannel(secure: Boolean, reason: String) {
+        if (TelegramPrefs.secureFor(networkKind) == secure) return
+        TelegramPrefs.setSecureFor(networkKind, secure)
+        AppLog.i(
+            TAG,
+            "$reason: ${channelLabelFor(secure)} запомнен для ${networkKindForLog()}"
+        )
+    }
+
+    /** Переключение канала на лету (автоподбор или ручной выбор). */
+    private fun applyChannel(secure: Boolean, reason: String) {
+        secureOverride = secure
+        TelegramRuntime.update { it.copy(probing = !probeDone) }
+        AppLog.w(TAG, "$reason: включаю ${channelLabelFor(secure)}")
+        NotificationHelper.notifyProblem(
+            this,
+            getString(R.string.telegram_channel_switched, channelLabelFor(secure))
+        )
+        restartProxy(reason, asStall = false)
+    }
+
     /**
      * Перезапускает нативный прокси, не убивая службу.
      *
      * `asStall = true` — это реакция на застой: считаем попытки и со второй
      * подряд меняем транспорт Cloudflare (TLS 443 ↔ HTTP 80). `false` —
-     * технический перезапуск (смена сети, ручное переключение канала),
+     * технический перезапуск (смена сети, автоподбор, ручной выбор канала),
      * транспорт остаётся тем, что выбран.
      */
     private fun restartProxy(reason: String, asStall: Boolean = true) {
@@ -594,13 +884,13 @@ class TelegramProxyService : Service() {
 
             /*
              * Второй застой подряд: транспорт не пропускает трафик.
-             * Пробуем противоположный — у операторов по-разному: кто-то
-             * режет TLS по SNI, кто-то HTTP на 80.
+             * Пробуем противоположный — у операторов и сетей по-разному:
+             * где-то режут TLS по SNI, где-то HTTP на 80.
              */
             if (stallCount >= 2 && secureOverride == null) {
                 val next = !effectiveSecure
                 secureOverride = next
-                TelegramPrefs.setSecure(next)
+                rememberChannel(next, "watchdog: переключение транспорта")
                 AppLog.w(
                     TAG,
                     "watchdog: $reason — переключаю транспорт на ${channelLabelFor(next)}"
@@ -633,20 +923,22 @@ class TelegramProxyService : Service() {
         startProxy(fresh = false)
     }
 
-    /** Ручное переключение транспорта Cloudflare из UI. */
-    private fun switchChannel() {
-        val next = !effectiveSecure
-        secureOverride = next
-        TelegramPrefs.setSecure(next)
-        AppLog.i(TAG, "Ручное переключение канала на ${channelLabelFor(next)}")
-        statsRunning = false
-        restartProxy("ручное переключение", asStall = false)
-    }
-
     private fun channelLabelFor(secure: Boolean, cf: Boolean = effectiveCf): String = when {
         !cf -> getString(R.string.telegram_channel_direct)
         secure -> getString(R.string.telegram_channel_tls)
         else -> getString(R.string.telegram_channel_http)
+    }
+
+    private fun networkKindForLog(): String = when (networkKind) {
+        TelegramPrefs.NET_WIFI -> "Wi-Fi"
+        TelegramPrefs.NET_CELL -> "мобильная сеть"
+        else -> "сеть"
+    }
+
+    private fun humanBytes(n: Long): String = when {
+        n >= 1024 * 1024 -> "${n / (1024 * 1024)}MB"
+        n >= 1024 -> "${n / 1024}KB"
+        else -> "${n}B"
     }
 
     /** Проверяет, что на порту действительно кто-то слушает. */
