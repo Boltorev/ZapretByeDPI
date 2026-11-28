@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.format.DateUtils
 import android.text.format.Formatter
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -21,6 +22,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.zapret.byedpi.core.AppLog
 import com.zapret.byedpi.core.EngineConfig
 import com.zapret.byedpi.core.LogEntry
+import com.zapret.byedpi.core.UpdateChecker
 import com.zapret.byedpi.core.VpnPhase
 import com.zapret.byedpi.core.VpnRuntime
 import com.zapret.byedpi.core.VpnState
@@ -145,7 +147,42 @@ class MainActivity : AppCompatActivity() {
         render(currentState)
         renderLogs(AppLog.entries.value)
 
+        binding.tvVersion.text = getString(R.string.version_label, UpdateChecker.currentVersion)
+        binding.tvUpdate.setOnClickListener {
+            openReleases()
+        }
         observeRuntime()
+        observeUpdateChecker()
+        UpdateChecker.refresh(this)
+    }
+
+    /**
+     * Показывает плашку «доступна новая версия», если на GitHub тег новее
+     * текущего. Проверка кэшируется на 12 часов, поэтому вызов безопасен
+     * при каждом открытии экрана.
+     */
+    private fun observeUpdateChecker() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                UpdateChecker.info.collect { info ->
+                    val latest = info.latest
+                    if (info.updateAvailable && latest != null) {
+                        binding.tvUpdate.text = getString(R.string.update_available, latest)
+                        binding.tvUpdate.visibility = View.VISIBLE
+                    } else {
+                        binding.tvUpdate.visibility = View.GONE
+                    }
+                }
+            }
+        }
+    }
+
+    private fun openReleases() {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UpdateChecker.RELEASES_URL)))
+        } catch (e: Exception) {
+            AppLog.w(TAG, "Не удалось открыть страницу релизов: ${e.message}")
+        }
     }
 
     /**
@@ -158,6 +195,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         binding.bottomNav.selectedItemId = R.id.nav_home
+        // Вернулись в приложение — заодно проверим, не вышло ли обновление.
+        UpdateChecker.refresh(this)
     }
 
     private fun observeRuntime() {

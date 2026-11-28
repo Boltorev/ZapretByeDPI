@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import com.zapret.byedpi.R
 import com.zapret.byedpi.core.AppMode
 import com.zapret.byedpi.core.AppRules
 import com.zapret.byedpi.core.AppLog
@@ -193,7 +194,12 @@ class ZapretVpnService : VpnService() {
                     Thread.sleep(800L)
                     if (stopping) return@execute
                     AppLog.i(TAG, "Пересоздаём ciadpi после смены сети")
-                    if (!restartByeDpi(strategy)) {
+                    if (restartByeDpi(strategy)) {
+                        VpnRuntime.update {
+                            it.copy(lastEvent = getString(R.string.event_network_restarted))
+                        }
+                        updateNotification()
+                    } else {
                         AppLog.e(TAG, "После смены сети ciadpi не поднялся")
                     }
                 } catch (_: InterruptedException) {
@@ -258,7 +264,8 @@ class ZapretVpnService : VpnService() {
                 rotationCount = 0,
                 tunName = null,
                 startedAt = null,
-                errorMessage = null
+                errorMessage = null,
+                lastEvent = null
             )
         }
         AppLog.i(
@@ -561,7 +568,8 @@ class ZapretVpnService : VpnService() {
                     engineLabel = "ciadpi + hev",
                     tunName = VpnConfig.TUN_NAME,
                     startedAt = System.currentTimeMillis(),
-                    errorMessage = null
+                    errorMessage = null,
+                    lastEvent = null
                 )
             }
             updateNotification()
@@ -576,9 +584,12 @@ class ZapretVpnService : VpnService() {
                     errorMessage = message,
                     engineLabel = null,
                     tunName = null,
-                    startedAt = null
+                    startedAt = null,
+                    lastEvent = message
                 )
             }
+            updateNotification()
+            NotificationHelper.notifyProblem(this, message)
             stopping = true
             enqueueStop(keepError = true)
         } finally {
@@ -816,7 +827,12 @@ class ZapretVpnService : VpnService() {
                 VpnRuntime.update {
                     it.copy(
                         presetName = next.name,
-                        rotationCount = it.rotationCount + 1
+                        rotationCount = it.rotationCount + 1,
+                        lastEvent = getString(
+                            R.string.event_strategy_changed,
+                            next.name,
+                            nextIndex
+                        )
                     )
                 }
                 updateNotification()
@@ -825,7 +841,12 @@ class ZapretVpnService : VpnService() {
                 AppLog.e(TAG, "AUTO $key: вариант $nextIndex не запустился, возвращаем текущий")
                 if (restartByeDpi(current, stopExisting = false)) {
                     activeStrategy = current
-                    VpnRuntime.update { it.copy(presetName = current.name) }
+                    VpnRuntime.update {
+                        it.copy(
+                            presetName = current.name,
+                            lastEvent = "Не удалось применить вариант $nextIndex — остался ${current.name}"
+                        )
+                    }
                     updateNotification()
                 } else {
                     onEngineFailed("AUTO: не удалось поднять ни новый, ни текущий вариант")
@@ -1100,9 +1121,13 @@ class ZapretVpnService : VpnService() {
                 errorMessage = message,
                 engineLabel = null,
                 tunName = null,
-                startedAt = null
+                startedAt = null,
+                lastEvent = message
             )
         }
+        // Ошибку должно быть видно и в шторке, а не только в приложении.
+        updateNotification()
+        NotificationHelper.notifyProblem(this, message)
         requestStop("движок завершился", keepError = true)
     }
 

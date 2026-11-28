@@ -3,6 +3,7 @@ package com.zapret.byedpi.util
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import com.zapret.byedpi.BuildConfig
 import com.zapret.byedpi.core.AppLog
 import com.zapret.byedpi.core.AppRules
 import com.zapret.byedpi.core.DomainStore
@@ -33,9 +34,21 @@ import java.util.Locale
 object LogExporter {
     private const val MAX_TAIL_BYTES = 300_000
 
+    /**
+     * Имя файла отчёта. Версия приложения в имени нужна, чтобы по присланному
+     * логу сразу было понятно, на какой сборке он снят:
+     * `zapret-log-0.6.5-20261128-202725.txt`.
+     */
     fun suggestFileName(): String {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        return "zapret-log-$stamp.txt"
+        val version = appVersionName().replace(Regex("[^0-9A-Za-z._-]"), "_")
+        return "zapret-log-$version-$stamp.txt"
+    }
+
+    private fun appVersionName(): String = try {
+        BuildConfig.VERSION_NAME
+    } catch (_: Throwable) {
+        "unknown"
     }
 
     fun write(context: Context, uri: Uri): Boolean {

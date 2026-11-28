@@ -18,8 +18,8 @@ android {
         applicationId "com.zapret.byedpi"
         minSdk 26          // Android 8.0 — минимальная поддерживаемая версия
         targetSdk 34       // Android 14
-        versionCode 17
-        versionName "0.6.4"
+        versionCode 18
+        versionName "0.6.5"
 
         ndk {
             // ABI, для которых собираются нативные части:
@@ -78,6 +78,8 @@ android {
     buildFeatures {
         // ViewBinding: вместо findViewById получаем типизированный binding.
         viewBinding true
+        // BuildConfig нужен для BuildConfig.VERSION_NAME (версия в UI и в имени лога).
+        buildConfig true
     }
 
     packaging {

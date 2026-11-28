@@ -24,6 +24,10 @@ object NotificationHelper {
     const val CHANNEL_ID = "vpn_status"
     const val NOTIFICATION_ID = 1001
 
+    /** Отдельный канал для разовых предупреждений о проблемах. */
+    const val PROBLEM_CHANNEL_ID = "vpn_problems"
+    const val PROBLEM_NOTIFICATION_ID = 1002
+
     /**
      * Канал нужно создать до первого startForeground().
      * Повторный вызов безопасен: если канал уже есть, ничего не делаем.
@@ -31,26 +35,73 @@ object NotificationHelper {
     fun createChannel(context: Context) {
         // minSdk = 26, поэтому NotificationChannel доступен всегда.
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
 
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            context.getString(R.string.notification_channel_name),
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = context.getString(R.string.notification_channel_description)
-            setShowBadge(false)
-            enableLights(false)
-            enableVibration(false)
-            setSound(null, null)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                context.getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = context.getString(R.string.notification_channel_description)
+                setShowBadge(false)
+                enableLights(false)
+                enableVibration(false)
+                setSound(null, null)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            manager.createNotificationChannel(channel)
         }
-        manager.createNotificationChannel(channel)
+
+        if (manager.getNotificationChannel(PROBLEM_CHANNEL_ID) == null) {
+            val problems = NotificationChannel(
+                PROBLEM_CHANNEL_ID,
+                context.getString(R.string.problem_channel_name),
+                // DEFAULT, а не LOW: о проблеме нужно узнать сразу.
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = context.getString(R.string.problem_channel_description)
+                setShowBadge(true)
+            }
+            manager.createNotificationChannel(problems)
+        }
+    }
+
+    /**
+     * Разовое уведомление о проблеме: ошибка движка, туннель не поднялся,
+     * Telegram-прокси не слушает порт. В отличие от постоянного уведомления,
+     * его можно смахнуть, и оно не висит, когда всё в порядке.
+     */
+    fun notifyProblem(context: Context, message: String) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        val openAppIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentIntent = PendingIntent.getActivity(
+            context,
+            2,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(context, PROBLEM_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_shield)
+            .setColor(ContextCompat.getColor(context, R.color.state_off))
+            .setContentTitle(context.getString(R.string.problem_title))
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        try {
+            manager.notify(PROBLEM_NOTIFICATION_ID, notification)
+        } catch (_: SecurityException) {
+            // Уведомления запрещены — ничего не поделать.
+        }
     }
 
     /**
      * Собирает уведомление под текущую фазу.
-     * Текст обновляется, когда служба переходит STARTING -> RUNNING.
+     * Текст обновляется при старте, смене стратегии и ошибках.
      */
     fun build(context: Context, state: VpnState): Notification {
         // Тап по уведомлению открывает главный экран.
@@ -75,10 +126,19 @@ object NotificationHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val text = if (state.phase == VpnPhase.RUNNING) {
-            context.getString(R.string.notification_text_running, state.presetName)
-        } else {
-            context.getString(R.string.notification_text_starting)
+        val text = when (state.phase) {
+            VpnPhase.ERROR -> context.getString(
+                R.string.notification_text_error,
+                state.errorMessage ?: context.getString(R.string.state_value_error)
+            )
+            VpnPhase.RUNNING -> buildString {
+                append(context.getString(R.string.notification_text_running, state.presetName))
+                val event = state.lastEvent
+                if (!event.isNullOrBlank()) {
+                    append('\n').append(event)
+                }
+            }
+            else -> context.getString(R.string.notification_text_starting)
         }
 
         return NotificationCompat.Builder(context, CHANNEL_ID)

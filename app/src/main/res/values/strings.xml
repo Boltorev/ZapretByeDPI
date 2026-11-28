@@ -51,6 +51,10 @@
     <string name="log_export_error">Не удалось сохранить логи</string>
     <string name="log_empty">Пока нет событий</string>
 
+    <!-- Версия и обновления -->
+    <string name="version_label">Версия %1$s</string>
+    <string name="update_available">Доступна новая версия %1$s — нажмите, чтобы обновиться</string>
+
     <!-- Подвал -->
     <string name="footer">ByeDPI 0.17.3 · hev 2.20.0 · TG WS Proxy</string>
 
@@ -59,7 +63,18 @@
     <string name="notification_channel_description">Постоянное уведомление о работе VPN-туннеля</string>
     <string name="notification_text_starting">Создаём VPN-туннель…</string>
     <string name="notification_text_running">VPN активен · пресет %1$s</string>
+    <string name="notification_text_error">Ошибка: %1$s</string>
     <string name="notification_action_stop">Остановить</string>
+
+    <!-- Уведомления о проблемах и событиях -->
+    <string name="problem_channel_name">Проблемы VPN</string>
+    <string name="problem_channel_description">Сообщения об ошибках и сбоях в работе</string>
+    <string name="problem_title">Проблема</string>
+    <string name="event_strategy_changed">Стратегия: %1$s · вариант %2$d</string>
+    <string name="event_network_restarted">Перезапуск после смены сети</string>
+    <string name="telegram_no_clients">Telegram не подключается к прокси — проверьте, что он добавлен в Telegram</string>
+    <string name="telegram_port_dead">Прокси не слушает порт %1$d</string>
+    <string name="telegram_cf_switched">Канал Cloudflare переключён, прокси перезапущен</string>
 
     <!-- Ошибки и разрешения -->
     <string name="vpn_permission_denied">Без разрешения VPN туннель создать нельзя.</string>

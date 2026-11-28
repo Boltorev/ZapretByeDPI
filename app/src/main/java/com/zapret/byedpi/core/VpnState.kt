@@ -44,7 +44,12 @@ data class VpnState(
     val startedAt: Long? = null,
     val errorMessage: String? = null,
     /** Подпись активного движка, например "ciadpi + hev". */
-    val engineLabel: String? = null
+    val engineLabel: String? = null,
+    /**
+     * Последнее заметное событие для строки уведомления:
+     * смена стратегии, перезапуск после смены сети и т.п.
+     */
+    val lastEvent: String? = null
 )
 
 /**

@@ -15,6 +15,9 @@ import androidx.core.content.ContextCompat
 import com.zapret.byedpi.R
 import com.zapret.byedpi.core.AppLog
 import com.zapret.byedpi.ui.SettingsActivity
+import com.zapret.byedpi.util.NotificationHelper
+import java.net.InetSocketAddress
+import java.net.Socket
 import kotlin.concurrent.thread
 
 class TelegramProxyService : Service() {
@@ -35,6 +38,12 @@ class TelegramProxyService : Service() {
 
         /** Пул из 8; если активных вчетверо больше при нулевом трафике — они мёртвые. */
         private const val STUCK_ACTIVE = 32
+
+        /** Прокси поднялся, но клиентов нет дольше этого времени — подсказываем. */
+        private const val NO_CLIENTS_MS = 120_000L
+
+        /** Застои, разнесённые дальше этого окна, считаются заново. */
+        private const val STALL_RESET_MS = 30 * 60_000L
 
         @Volatile
         private var working = false
@@ -66,8 +75,29 @@ class TelegramProxyService : Service() {
     @Volatile
     private var lastRestartAt = 0L
 
+    /** Сколько подряд застоев: со второго пробуем другой канал Cloudflare. */
+    @Volatile
+    private var stallCount = 0
+
+    @Volatile
+    private var lastStallAt = 0L
+
+    /** Переопределение Cloudflare только на текущий запуск службы. */
+    @Volatile
+    private var cfOverride: Boolean? = null
+
+    /** Момент, когда прокси поднялся: нужен для подсказки «Telegram не подключается». */
+    @Volatile
+    private var proxyStartedAt = 0L
+
+    @Volatile
+    private var noClientsNotified = false
+
     override fun onCreate() {
         super.onCreate()
+        // Канал проблем общий с VPN-службой: создаём и здесь, иначе
+        // уведомление о сбое прокси не покажется, если VPN не запускали.
+        NotificationHelper.createChannel(this)
         createChannel()
     }
 
@@ -123,7 +153,7 @@ class TelegramProxyService : Service() {
                 TelegramNative.configurePool(
                     poolSize = 8,
                     cacheDir = cacheDir.absolutePath,
-                    cfEnabled = TelegramPrefs.cfEnabled()
+                    cfEnabled = cfOverride ?: TelegramPrefs.cfEnabled()
                 )
                 val rc = TelegramNative.startProxy(
                     host = "127.0.0.1",
@@ -135,6 +165,35 @@ class TelegramProxyService : Service() {
                 if (rc != 0) {
                     fail("StartProxy вернул код $rc")
                     return@thread
+                }
+
+                /*
+                 * Проверяем, что порт реально слушается. В логе 0.6.4 после
+                 * перезапуска watchdog'ом прокси писал «работает», а Telegram
+                 * к нему не подключался: порт остался мёртвым. Одна попытка
+                 * перезапуска лечит это; если нет — честно показываем ошибку.
+                 */
+                if (!isPortListening(port)) {
+                    AppLog.w(TAG, "порт $port не слушается после запуска, перезапускаю")
+                    try {
+                        TelegramNative.stopProxy()
+                    } catch (_: Throwable) {
+                    }
+                    Thread.sleep(700L)
+                    val retry = TelegramNative.startProxy(
+                        host = "127.0.0.1",
+                        port = port,
+                        dcIps = "",
+                        secret = secret,
+                        verbose = true
+                    )
+                    if (retry != 0 || !isPortListening(port)) {
+                        val text = getString(R.string.telegram_port_dead, port)
+                        AppLog.e(TAG, text)
+                        fail(text)
+                        NotificationHelper.notifyProblem(this, text)
+                        return@thread
+                    }
                 }
 
                 if (stopRequested) {
@@ -154,6 +213,8 @@ class TelegramProxyService : Service() {
                         error = null
                     )
                 }
+                proxyStartedAt = System.currentTimeMillis()
+                noClientsNotified = false
                 AppLog.i(TAG, "Telegram WS-прокси работает: 127.0.0.1:$port")
                 TelegramNative.stats()?.let { AppLog.i(TAG, "stats: $it") }
                 startStatsLogger()
@@ -195,6 +256,7 @@ class TelegramProxyService : Service() {
         }
         AppLog.e(TAG, "Telegram WS-прокси: $message")
         updateNotification(getString(R.string.telegram_error, message))
+        NotificationHelper.notifyProblem(this, getString(R.string.telegram_error, message))
     }
 
     private fun startStatsLogger() {
@@ -221,6 +283,21 @@ class TelegramProxyService : Service() {
                 val total = statValue(stats, "total")?.toLongOrNull() ?: -1L
                 val active = statValue(stats, "active")?.toIntOrNull() ?: 0
                 val now = System.currentTimeMillis()
+
+                /*
+                 * Прокси поднялся, но к нему никто не подключается дольше
+                 * двух минут — обычно это значит, что прокси не добавлен
+                 * в Telegram. Говорим об этом прямо, иначе выглядит как
+                 * «прокси не работает».
+                 */
+                if (!noClientsNotified && total == 0L && proxyStartedAt > 0 &&
+                    now - proxyStartedAt > NO_CLIENTS_MS
+                ) {
+                    noClientsNotified = true
+                    val hint = getString(R.string.telegram_no_clients)
+                    AppLog.w(TAG, hint)
+                    NotificationHelper.notifyProblem(this, hint)
+                }
 
                 val newConnections = total != lastTotal
                 val upGrew = up > lastUp
@@ -281,6 +358,25 @@ class TelegramProxyService : Service() {
      * потом обычный путь запуска (он сам поднимет новый stats-логгер).
      */
     private fun restartAfterStall() {
+        val now = System.currentTimeMillis()
+        if (now - lastStallAt > STALL_RESET_MS) stallCount = 0
+        stallCount++
+        lastStallAt = now
+
+        /*
+         * Второй застой подряд: один и тот же канал Cloudflare, скорее всего,
+         * перестал пропускать трафик (типично для мобильных операторов).
+         * На этот запуск службы пробуем противоположную настройку CF;
+         * после ручного перезапуска вернётся выбор пользователя.
+         */
+        if (stallCount >= 2 && cfOverride == null) {
+            val current = TelegramPrefs.cfEnabled()
+            cfOverride = !current
+            val text = getString(R.string.telegram_cf_switched)
+            AppLog.w(TAG, "watchdog: второй застой подряд — Cloudflare $current -> ${!current}")
+            NotificationHelper.notifyProblem(this, text)
+        }
+
         try {
             TelegramNative.stats()?.let { AppLog.i(TAG, "stats before restart: $it") }
             TelegramNative.stopProxy()
@@ -294,6 +390,16 @@ class TelegramProxyService : Service() {
             Thread.currentThread().interrupt()
         }
         startProxy()
+    }
+
+    /** Проверяет, что на порту действительно кто-то слушает. */
+    private fun isPortListening(port: Int): Boolean = try {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress("127.0.0.1", port), 1_000)
+            true
+        }
+    } catch (_: Throwable) {
+        false
     }
 
     private fun statValue(stats: String, key: String): String? =

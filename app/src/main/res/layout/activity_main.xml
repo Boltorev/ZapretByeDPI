@@ -47,7 +47,30 @@
             android:textColor="@color/text_secondary"
             android:textSize="14sp" />
 
-        
+        <!-- Версия приложения: подставляется из BuildConfig -->
+        <TextView
+            android:id="@+id/tvVersion"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <!-- Плашка обновления: видна, только если на GitHub версия новее -->
+        <TextView
+            android:id="@+id/tvUpdate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_update_banner"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="12dp"
+            android:textColor="@color/warning_text"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
 
         <!--
           Большая круглая кнопка.
